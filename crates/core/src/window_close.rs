@@ -93,6 +93,20 @@ pub fn request_close_window(window_handle: AnyWindowHandle, cx: &mut App) {
     });
 }
 
+/// 这个构建是否启用「关闭即隐藏」兜底（Intel macOS 发布包）。
+///
+/// 只有 `x86_64-apple-darwin` 的发布包会在打包时打开 `macos-touchbar-window-hide`
+/// （见 `crates/core/Cargo.toml` 的 feature 说明与 `docs/macos-memory-investigation.md` §10）。
+/// 未启用时所有隐藏路径都必须退回原来的「关闭即销毁」，行为与加这套机制之前一致。
+///
+/// 开关刻意收敛成**一个常量**而不是散落的 `#[cfg]`：弹窗（[`crate::popup_window`]）、
+/// 编辑器窗口（`remote_file_editor::editor_window_visibility`）都要读它，写死在各处
+/// 很容易漏掉一处而留下半开半关的状态。
+pub const HIDE_WINDOWS_ON_CLOSE: bool = cfg!(all(
+    target_os = "macos",
+    feature = "macos-touchbar-window-hide"
+));
+
 /// 只隐藏原生窗口、**不销毁**它。macOS 上「关闭后复用」的基础动作。
 ///
 /// # 为什么需要它
@@ -110,7 +124,8 @@ pub fn request_close_window(window_handle: AnyWindowHandle, cx: &mut App) {
 /// # 返回值
 ///
 /// - `Ok(true)`：已隐藏。调用方**不要**再 `remove_window()`。
-/// - `Ok(false)`：当前平台不走这套（非 macOS），调用方照旧销毁。
+/// - `Ok(false)`：当前构建不走这套（非 macOS，或没开 `macos-touchbar-window-hide`），
+///   调用方照旧销毁。
 /// - `Err`：隐藏失败。调用方同样应照旧销毁。
 ///
 /// 与 `remote_file_editor::editor_window_visibility::hide_for_reuse` 同构 —— 那份是
@@ -120,6 +135,12 @@ pub fn request_close_window(window_handle: AnyWindowHandle, cx: &mut App) {
 pub fn hide_for_reuse(window: &Window) -> anyhow::Result<bool> {
     use anyhow::Context as _;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // 未启用兜底的构建（ARM macOS、Windows、Linux）直接说「不走这套」，让调用方按原行为
+    // 销毁窗口。判据只有这一个常量，见 [`HIDE_WINDOWS_ON_CLOSE`]。
+    if !HIDE_WINDOWS_ON_CLOSE {
+        return Ok(false);
+    }
 
     // NSWindow 只能在主线程上操作。
     let Some(_main_thread) = objc2::MainThreadMarker::new() else {
@@ -149,9 +170,15 @@ pub fn hide_for_reuse(_window: &Window) -> anyhow::Result<bool> {
 ///
 /// 返回 `true` 表示窗口只是被隐藏、**仍然存活**。
 ///
+/// # 生效范围
+///
+/// 整套「隐藏不销毁」只在 [`HIDE_WINDOWS_ON_CLOSE`] 为真时生效，也就是打包时开了
+/// `macos-touchbar-window-hide` 的 x86_64 macOS 包。未启用时这个函数对弹窗的结果与普通
+/// 窗口一样：`remove_window()`，即加这套机制之前的行为。
+///
 /// # 弹窗一律不销毁
 ///
-/// 凡是通过 [`crate::popup_window::open_popup_window`] / [`crate::popup_window::open_reusable_popup_window`]
+/// 开关打开时，凡是通过 [`crate::popup_window::open_popup_window`] / [`crate::popup_window::open_reusable_popup_window`]
 /// 打开的窗口，关闭时都只隐藏 —— 包括**没有复用键的一次性弹窗**。这不是保守，而是现场
 /// 逼出来的：只要窗口是在**某条路线**上被销毁的，那条路线就会被 AppKit 的 Touch Bar
 /// 观察者延迟注销踩到（#308 「确定」、#314 「保存」，以及 0.3.118 版里唯一还在崩的红点）。
@@ -163,8 +190,8 @@ pub fn hide_for_reuse(_window: &Window) -> anyhow::Result<bool> {
 /// 种类数」）；（2）给停放窗口数设上限，超过时按我们自己的路线延迟销毁最旧的一个 —— 那时
 /// 销毁已经不在 AppKit 的关闭流程里。
 ///
-/// 不在这条链上的窗口（设置窗口、编辑器窗口……）照旧销毁：它们不经过弹窗登记表，也没有
-/// 上面那个崩溃点。
+/// 不在这条链上的窗口（主窗口）照旧走各自的关闭语义：主窗口关闭 = 隐藏到托盘或退出应用，
+/// 与这套机制无关。
 ///
 /// # 「关闭」包含两件事，缺一不可
 ///
@@ -238,5 +265,94 @@ mod tests {
         state.remove(window_id);
 
         assert!(!state.contains(window_id));
+    }
+
+    /// 除主窗口外，业务代码里不允许再自己销毁窗口。
+    ///
+    /// 「关闭即隐藏」只要漏掉一个入口就等于没修：那条入口照样会销毁原生窗口，AppKit 的
+    /// Touch Bar 观察者照样会在下一个显示周期里踩到已释放的对象（#308 的「确定」和
+    /// 「取消」、#314 的「保存」都是这么漏出来的）。所以把「弹窗 / 表单窗口把自己的关闭动作
+    /// 一律交给 `close_window_for_reuse`」钉成一条源码契约。
+    ///
+    /// 允许直接销毁的地方只剩下面三类，它们都不在契约清单里：
+    /// - 主窗口那条链（关闭主窗口 = 隐藏到托盘或退出应用）；
+    /// - `close_window_for_reuse` 自己，以及 `hide_for_reuse` 返回 `Ok(false)` / `Err` 时的兜底；
+    /// - 编辑器窗口的兜底分支（`prepare_window_close` 返回 `true` 才销毁，已经在它自己的
+    ///   测试里逐个方法断言过）。
+    #[test]
+    fn secondary_windows_never_destroy_themselves() {
+        // include_str! 用的是相对于本文件的路径，所以从 crates/core/src 往上退三级。
+        let sources: [(&str, &str); 15] = [
+            (
+                "main/src/new_connection/connection_window.rs",
+                include_str!("../../../main/src/new_connection/connection_window.rs"),
+            ),
+            (
+                "main/src/credential_vault/form_window.rs",
+                include_str!("../../../main/src/credential_vault/form_window.rs"),
+            ),
+            (
+                "crates/db_view/src/connection_form_window.rs",
+                include_str!("../../../crates/db_view/src/connection_form_window.rs"),
+            ),
+            (
+                "crates/connection_form/src/middleware_form/window.rs",
+                include_str!("../../../crates/connection_form/src/middleware_form/window.rs"),
+            ),
+            (
+                "crates/mongodb_view/src/mongo_form_window.rs",
+                include_str!("../../../crates/mongodb_view/src/mongo_form_window.rs"),
+            ),
+            (
+                "crates/redis_view/src/redis_form_window.rs",
+                include_str!("../../../crates/redis_view/src/redis_form_window.rs"),
+            ),
+            (
+                "crates/remote_desktop_view/src/remote_desktop_form.rs",
+                include_str!("../../../crates/remote_desktop_view/src/remote_desktop_form.rs"),
+            ),
+            (
+                "crates/remote_desktop_view/src/remote_desktop_form/connection_test.rs",
+                include_str!(
+                    "../../../crates/remote_desktop_view/src/remote_desktop_form/connection_test.rs"
+                ),
+            ),
+            (
+                "crates/terminal_view/src/ssh_form_window.rs",
+                include_str!("../../../crates/terminal_view/src/ssh_form_window.rs"),
+            ),
+            (
+                "crates/terminal_view/src/ftp_form_window.rs",
+                include_str!("../../../crates/terminal_view/src/ftp_form_window.rs"),
+            ),
+            (
+                "crates/terminal_view/src/telnet_form_window.rs",
+                include_str!("../../../crates/terminal_view/src/telnet_form_window.rs"),
+            ),
+            (
+                "crates/terminal_view/src/serial_form_window.rs",
+                include_str!("../../../crates/terminal_view/src/serial_form_window.rs"),
+            ),
+            (
+                "crates/port_forwarding_view/src/form_window.rs",
+                include_str!("../../../crates/port_forwarding_view/src/form_window.rs"),
+            ),
+            (
+                "crates/port_forwarding_view/src/view.rs",
+                include_str!("../../../crates/port_forwarding_view/src/view.rs"),
+            ),
+            (
+                "crates/universal-plugins/src/extension_connection_form.rs",
+                include_str!("../../../crates/universal-plugins/src/extension_connection_form.rs"),
+            ),
+        ];
+
+        for (path, source) in sources {
+            assert!(
+                !source.contains("window.remove_window()"),
+                "{path} 里还有直接销毁窗口的写法：这类窗口必须走 one_core::window_close::close_window_for_reuse，\
+                 否则 Intel Mac（Touch Bar）上关闭时会闪退"
+            );
+        }
     }
 }
