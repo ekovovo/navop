@@ -1067,6 +1067,25 @@ mod test {
     }
 
     #[test]
+    fn probe_external_dialect_comment_split() {
+        let cases = [
+            r#"COMMENT ON COLUMN "ai-manager-330-dev"."AI_SKILL_ABILITY_SYNC_RECORD"."ID" IS 'Id';"#,
+            r#"COMMENT ON COLUMN "ai-manager-330-dev"."AI_SKILL_ABILITY_SYNC_RECORD"."ID" IS 'Id'"#,
+            r#"ALTER TABLE "ai-manager-330-dev"."t" ADD COLUMN "c" VARCHAR(20);"#,
+        ];
+        for case in cases {
+            for db_type in [
+                DatabaseType::Oracle,
+                DatabaseType::external("dm".to_string()),
+                DatabaseType::MySQL,
+            ] {
+                let parsed = parse_all(SqlSource::Script(case.to_string()), db_type.clone());
+                println!("db_type={db_type:?} sql={case:?} -> {parsed:?}");
+            }
+        }
+    }
+
+    #[test]
     fn test_basic_statements() {
         let sql = "SELECT * FROM users;\nINSERT INTO users VALUES (1, 'test');\nUPDATE users SET name = 'new';";
         let statements = parse_all(SqlSource::Script(sql.to_string()), DatabaseType::MySQL);
@@ -1621,6 +1640,23 @@ UNLOCK TABLES;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains(r#""id""#));
+    }
+
+    #[test]
+    fn test_comment_on_column_statement_is_kept() {
+        // 达梦表设计器写列注释的三段式语句不能被切分器丢掉
+        let sql =
+            r#"COMMENT ON COLUMN "ai-manager-330-dev"."AI_SKILL_ABILITY_SYNC_RECORD"."ID" IS 'Id'"#;
+        let statements = parse_all(SqlSource::Script(sql.to_string()), DatabaseType::Oracle);
+        assert_eq!(statements.len(), 1, "statements: {statements:?}");
+        assert!(statements[0].starts_with("COMMENT ON COLUMN"));
+        assert!(statements[0].ends_with("'Id'"));
+
+        // 带结尾分号 + 前后混合注释也要保留
+        let sql = "-- set comment\nCOMMENT ON COLUMN \"t\".\"c\" IS 'x';\n";
+        let statements = parse_all(SqlSource::Script(sql.to_string()), DatabaseType::Oracle);
+        assert_eq!(statements.len(), 1, "statements: {statements:?}");
+        assert!(statements[0].starts_with("COMMENT ON COLUMN"));
     }
 
     #[test]
