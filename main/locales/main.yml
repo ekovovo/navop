@@ -5082,6 +5082,14 @@ CredentialForm:
     en: Include this credential in end-to-end encrypted sync.
     zh-CN: 将此凭据加入端到端加密同步。
     zh-HK: 將此憑證加入端對端加密同步。
+  forward_to_agent:
+    en: Forward this key through ssh-agent
+    zh-CN: 通过 ssh-agent 转发此密钥
+    zh-HK: 透過 ssh-agent 轉發此金鑰
+  forward_to_agent_description:
+    en: Load this key into the local ssh-agent and enable ForwardAgent so the remote server can authenticate onward with it.
+    zh-CN: 将此密钥加入本地 ssh-agent 并启用 ForwardAgent，使远端可继续使用该密钥进行后续认证。
+    zh-HK: 將此金鑰加入本機 ssh-agent 並啟用 ForwardAgent，讓遠端可繼續以此金鑰進行後續驗證。
   error_name_required:
     en: Credential name is required
     zh-CN: 凭据名称不能为空
