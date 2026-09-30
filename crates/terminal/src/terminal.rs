@@ -424,6 +424,7 @@ fn agent_identities_from_auth(auth: &SshAuthMethod) -> Vec<AgentIdentity> {
             private_key: private_key.clone(),
             passphrase: passphrase.clone(),
         }],
+        SshAuthMethod::Chain(steps) => steps.iter().flat_map(agent_identities_from_auth).collect(),
         SshAuthMethod::Password { .. }
         | SshAuthMethod::Agent
         | SshAuthMethod::Pageant

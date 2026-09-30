@@ -824,9 +824,7 @@ async fn connect_to_local_agent() -> Result<(impl AsyncRead + AsyncWrite + Unpin
     #[cfg(windows)]
     {
         const NAMED_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(NAMED_PIPE)
-            .await?;
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(NAMED_PIPE)?;
         Ok((stream, NAMED_PIPE.to_string()))
     }
     #[cfg(not(any(unix, windows)))]
