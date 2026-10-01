@@ -444,6 +444,7 @@ impl CloudSyncService {
             passphrase: credential.passphrase.clone(),
             ssh_expect: credential.ssh_expect.clone(),
             owner_id: credential.owner_id.clone(),
+            forward_to_agent: credential.forward_to_agent,
         };
         let plaintext = serde_json::to_string(&plain_data)
             .map_err(|error| SyncError::DataFormatError(error.to_string()))?;
@@ -587,6 +588,7 @@ impl CloudSyncService {
             owner_id: plain_data.owner_id,
             created_at: None,
             updated_at: Some(synced_at),
+            forward_to_agent: plain_data.forward_to_agent,
         })
     }
 
