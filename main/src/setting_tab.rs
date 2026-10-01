@@ -49,7 +49,8 @@ use gpui_component::{
 use one_assets::IconName;
 use one_core::cloud_sync::{
     CloudSyncService, GlobalCloudUser, SyncEngine, TeamKeyCacheStatus, TeamOption,
-    get_cached_team_options, personal::SyncStoreHealth,
+    get_cached_team_options,
+    personal::{SyncStoreHealth, open_webdav_password, seal_webdav_password},
 };
 use one_core::connection_notifier::{ConnectionDataEvent, get_notifier};
 use one_core::crypto;
@@ -1083,6 +1084,15 @@ fn sync_setting_group(
             personal_sync_path_item(defaults.path.clone()),
             personal_sync_auto_sync_item(defaults.auto_sync),
             personal_sync_git_auto_push_item(defaults.git.auto_push),
+            personal_sync_webdav_url_item(defaults.webdav.url.clone()),
+            personal_sync_webdav_username_item(defaults.webdav.username.clone()),
+            SettingItem::render(move |options, window, cx| {
+                render_personal_sync_webdav_password_field(options, window, cx)
+            })
+            .keywords([
+                t!("Settings.Sync.webdav_password").to_string(),
+                t!("Settings.Sync.backend").to_string(),
+            ]),
             SettingItem::render(move |_options, window, cx| {
                 render_personal_sync_actions(window, cx)
             })
@@ -1306,7 +1316,158 @@ pub(crate) fn personal_sync_backend_options() -> Vec<(SharedString, SharedString
             SharedString::from("git"),
             SharedString::from(t!("Settings.Sync.Backend.git")),
         ),
+        (
+            SharedString::from("webdav"),
+            SharedString::from(t!("Settings.Sync.Backend.webdav")),
+        ),
     ]
+}
+
+// ============================================================================
+// WebDAV 后端：服务器地址 / 用户名 / 密码
+// ============================================================================
+
+fn personal_sync_webdav_url_item(default: String) -> SettingItem {
+    SettingItem::new(
+        t!("Settings.Sync.webdav_url"),
+        SettingField::render(move |options, window, cx| {
+            render_personal_sync_webdav_text_field("url", default.clone(), options, window, cx)
+        }),
+    )
+    .description(t!("Settings.Sync.webdav_url_desc").to_string())
+}
+
+fn personal_sync_webdav_username_item(default: String) -> SettingItem {
+    SettingItem::new(
+        t!("Settings.Sync.webdav_username"),
+        SettingField::render(move |options, window, cx| {
+            render_personal_sync_webdav_text_field("username", default.clone(), options, window, cx)
+        }),
+    )
+    .description(t!("Settings.Sync.webdav_username_desc").to_string())
+}
+
+struct WebDavInputState {
+    input: Entity<InputState>,
+    _subscription: gpui::Subscription,
+}
+
+/// 构造（或复用）一个 webdav 输入框，并把它当前的值绑定回 settings。
+///
+/// 返回 `Entity<InputState>` 而不是 `use_keyed_state` 的返回值，避免把这个 API 的
+/// 具体类型一路透传出去。
+fn bind_webdav_input(
+    field: &'static str,
+    options: &gpui_component::setting::RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+    build: impl FnOnce(&mut Window, &mut Context<InputState>) -> InputState,
+) -> Entity<InputState> {
+    let state = window.use_keyed_state(
+        SharedString::from(format!(
+            "personal-sync-webdav-{}-{}-{}-{}",
+            field,
+            options.page_ix(),
+            options.group_ix(),
+            options.item_ix()
+        )),
+        cx,
+        move |window, cx| {
+            let input = cx.new(|cx| build(window, cx));
+            let _subscription = cx.subscribe(&input, |_, input, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let value = input.read(cx).value();
+                AppSettings::update_and_save(cx, |settings| match field {
+                    "url" => settings.personal_sync.webdav.url = value.trim().to_string(),
+                    "username" => {
+                        settings.personal_sync.webdav.username = value.trim().to_string()
+                    }
+                    // 密码不在 settings.json 里留明文：落盘前先加密。
+                    _ => settings.personal_sync.webdav.password = seal_webdav_password(&value),
+                });
+            });
+            WebDavInputState {
+                input,
+                _subscription,
+            }
+        },
+    );
+    state.read(cx).input.clone()
+}
+
+/// 渲染一个把值写回 `personal_sync.webdav.<field>` 的输入框。
+fn render_personal_sync_webdav_text_field(
+    field: &'static str,
+    default: String,
+    options: &gpui_component::setting::RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let value = match field {
+        "username" => AppSettings::global(cx).personal_sync.webdav.username.clone(),
+        _ => AppSettings::global(cx).personal_sync.webdav.url.clone(),
+    };
+    let input = bind_webdav_input(field, options, window, cx, |window, cx| {
+        InputState::new(window, cx)
+            .default_value(value)
+            .placeholder(default)
+    });
+
+    Input::new(&input)
+        .with_size(options.size())
+        .map(|this| {
+            if options.layout().is_horizontal() {
+                this.w_64()
+            } else {
+                this.w_full()
+            }
+        })
+        .into_any_element()
+}
+
+/// 密码框：掩码显示，且在写回 settings 前先用主密钥（或本机兜底密钥）加密。
+fn render_personal_sync_webdav_password_field(
+    options: &gpui_component::setting::RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let stored = AppSettings::global(cx).personal_sync.webdav.password.clone();
+    let configured = !stored.is_empty();
+    let plaintext = open_webdav_password(&stored);
+
+    let input = bind_webdav_input("password", options, window, cx, |window, cx| {
+        InputState::new(window, cx)
+            .default_value(plaintext)
+            .masked(true)
+            .placeholder(t!("Settings.Sync.webdav_password_placeholder").to_string())
+    });
+
+    v_flex()
+        .gap_1()
+        .child(
+            Input::new(&input)
+                .with_size(options.size())
+                .map(|this| {
+                    if options.layout().is_horizontal() {
+                        this.w_64()
+                    } else {
+                        this.w_full()
+                    }
+                }),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(if configured {
+                    t!("Settings.Sync.webdav_password_stored_encrypted").to_string()
+                } else {
+                    t!("Settings.Sync.webdav_password_empty_hint").to_string()
+                }),
+        )
+        .into_any_element()
 }
 
 pub(crate) fn personal_sync_status_label(health: &SyncStoreHealth) -> String {
@@ -1327,6 +1488,12 @@ pub(crate) fn personal_sync_status_label(health: &SyncStoreHealth) -> String {
         }
         SyncStoreHealth::PausedAfterRepeatedFailures => {
             t!("Settings.Sync.Status.paused_after_repeated_failures").to_string()
+        }
+        SyncStoreHealth::WebdavAuthFailed => {
+            t!("Settings.Sync.Status.webdav_auth_failed").to_string()
+        }
+        SyncStoreHealth::WebdavUnreachable => {
+            t!("Settings.Sync.Status.webdav_unreachable").to_string()
         }
     }
 }
