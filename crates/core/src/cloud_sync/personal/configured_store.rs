@@ -28,7 +28,7 @@ impl ConfiguredPersonalSyncStore<CommandGitRunner> {
     pub fn from_runtime_config(
         config: &super::PersonalSyncRuntimeConfig,
         http: Arc<dyn HttpClient>,
-    ) -> ConfiguredPersonalSyncStore<CommandGitRunner> {
+    ) -> Result<ConfiguredPersonalSyncStore<CommandGitRunner>, SyncStoreError> {
         Self::from_backend(
             config.backend,
             config.root.clone(),

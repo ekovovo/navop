@@ -153,7 +153,7 @@ impl WebDavSyncStore {
         let url = self.child_url(file_name);
         let mut builder = Request::builder()
             .method(method.clone())
-            .uri(&url)
+            .uri(url.as_str())
             .header("Authorization", self.basic_auth());
         if body.is_some() {
             builder = builder.header("Content-Type", "application/json");
@@ -229,7 +229,11 @@ impl WebDavSyncStore {
         Ok(Some(reply.body))
     }
 
-    async fn upload(&self, file_name: &str, value: &impl Serialize) -> Result<(), SyncStoreError> {
+    async fn upload(
+        &self,
+        file_name: &str,
+        value: &(impl Serialize + Sync),
+    ) -> Result<(), SyncStoreError> {
         let bytes = serde_json::to_vec_pretty(value)?;
         let reply = self.send(Method::PUT, file_name, Some(bytes)).await?;
         self.ensure_success(&reply)
@@ -252,9 +256,12 @@ impl WebDavSyncStore {
     /// 读改写索引：取出最新索引，应用 `mutate`，再整体回写。
     ///
     /// 写失败（通常是被并发方抢先）时重新读取一次再改，最多 [`INDEX_WRITE_ATTEMPTS`] 轮。
+    ///
+    /// `mutate` 必须 `Send`：`#[async_trait]` 生成的 future 要求 `Send`，而闭包会被
+    /// 跨 `.await` 持有在 future 状态里。
     async fn mutate_index(
         &self,
-        mutate: impl Fn(&mut WebDavSyncIndex),
+        mutate: impl Fn(&mut WebDavSyncIndex) + Send,
     ) -> Result<(), SyncStoreError> {
         let mut last_error: Option<SyncStoreError> = None;
 
