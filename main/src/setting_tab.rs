@@ -1374,7 +1374,10 @@ fn bind_webdav_input(
         cx,
         move |window, cx| {
             let input = cx.new(|cx| build(window, cx));
-            let _subscription = cx.subscribe(&input, |_, input, event: &InputEvent, cx| {
+            // `subscribe` 的回调要求 `'static`，而 `field` 是外层闭包的局部变量。
+            // 必须 `move` 按值捕获（`&'static str` 本身是 Copy + 'static），
+            // 否则闭包按引用借用它，触发 E0373。
+            let _subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
                 if !matches!(event, InputEvent::Change) {
                     return;
                 }
