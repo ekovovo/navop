@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -102,6 +103,8 @@ pub struct WebDavSyncStore {
     base_url: String,
     username: String,
     password: String,
+    /// 目标集合是否已确认存在。首次写入前用 MKCOL 建一次，之后不再重复。
+    collection_ready: Arc<AtomicBool>,
 }
 
 impl WebDavSyncStore {
@@ -124,6 +127,7 @@ impl WebDavSyncStore {
             base_url: normalize_base_url(&url),
             username: credentials.username.trim().to_string(),
             password: credentials.password,
+            collection_ready: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -184,6 +188,11 @@ impl WebDavSyncStore {
     }
 
     /// 把非 2xx 响应翻译成领域错误。
+    ///
+    /// 注意：**这里不把 409 当成版本冲突**。本实现从不发送 `If-Match` 之类的条件请求头，
+    /// 所以服务端返回的 409 只会是「父集合不存在」——`PUT` 无法凭空创建中间目录。
+    /// 把它误判成 `Conflict` 会让 worker 进入重试退避并最终「多次失败后暂停」，
+    /// 而真正需要的只是先 `MKCOL` 建一次目录。
     fn ensure_success(&self, reply: &HttpReply) -> Result<(), SyncStoreError> {
         if reply.is_success() {
             return Ok(());
@@ -192,20 +201,23 @@ impl WebDavSyncStore {
         let status = reply.status.as_u16();
         Err(match reply.status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => SyncStoreError::WebdavAuthFailed,
-            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => SyncStoreError::Conflict(
-                format!("WebDAV 记录版本冲突 ({status})：{}", reply_snippet(reply)),
-            ),
-            StatusCode::NOT_FOUND => {
-                SyncStoreError::Io(format!("WebDAV 资源不存在 ({status})"))
+
+            // 目录层面的问题：映射到 DirectoryUnavailable，界面显示「目录不可用」并给出
+            // 可操作提示，而不是误导性的「多次失败后暂停」。
+            StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
+                SyncStoreError::DirectoryUnavailable(format!(
+                    "目标目录不存在或不可写（HTTP {status}）：{}。\
+                     请在 WebDAV 服务器上确认该目录已创建（例如坚果云网页版新建文件夹），\
+                     或改用一个已存在的目录。",
+                    reply_snippet(reply)
+                ))
             }
             StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED => {
-                SyncStoreError::WebdavStatus {
-                    status,
-                    message: format!(
-                        "服务端不支持本次操作，请确认 WebDAV 地址指向一个可写目录：{}",
-                        reply_snippet(reply)
-                    ),
-                }
+                SyncStoreError::DirectoryUnavailable(format!(
+                    "服务端不支持该操作（HTTP {status}）：{}。\
+                     请确认地址指向一个支持 WebDAV 写入的目录，且账号有写权限。",
+                    reply_snippet(reply)
+                ))
             }
             StatusCode::INSUFFICIENT_STORAGE | StatusCode::PAYLOAD_TOO_LARGE => {
                 SyncStoreError::WebdavStatus {
@@ -218,6 +230,24 @@ impl WebDavSyncStore {
                 message: reply_snippet(reply),
             },
         })
+    }
+
+    /// 确保远端目标集合存在，必要时用 `MKCOL` 建一次。
+    ///
+    /// 这是扁平布局能落地的关键：记录文件名虽然不带目录，但 `PUT` 仍要求父集合已存在。
+    /// 坚果云、群晖、Nextcloud、Apache mod_dav、nginx dav 都支持 MKCOL。
+    async fn ensure_collection(&self) -> Result<(), SyncStoreError> {
+        if self.collection_ready.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let reply = self.send(mkcol_method(), "", None).await?;
+        // 2xx = 新建成功；301/405/409 = 已经存在，同样视为就绪。
+        if reply.is_success() || matches!(reply.status.as_u16(), 301 | 405 | 409) {
+            self.collection_ready.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.ensure_success(&reply)
     }
 
     async fn download(&self, file_name: &str) -> Result<Option<Vec<u8>>, SyncStoreError> {
@@ -235,7 +265,20 @@ impl WebDavSyncStore {
         value: &(impl Serialize + Sync + Send),
     ) -> Result<(), SyncStoreError> {
         let bytes = serde_json::to_vec_pretty(value)?;
+        // PUT 不会创建中间目录，必须先把集合建出来。
+        self.ensure_collection().await?;
         let reply = self.send(Method::PUT, file_name, Some(bytes)).await?;
+        if reply.is_success() {
+            return Ok(());
+        }
+        // 服务端可能在两次调用之间把目录删掉，或首次 MKCOL 因父目录缺失而失败；
+        // 失效一次缓存后重试一次，再失败就如实报错。
+        self.collection_ready.store(false, Ordering::Relaxed);
+        if matches!(reply.status.as_u16(), 404 | 409) {
+            self.ensure_collection().await?;
+            let retry = self.send(Method::PUT, file_name, Some(bytes)).await?;
+            return self.ensure_success(&retry);
+        }
         self.ensure_success(&reply)
     }
 
@@ -511,6 +554,14 @@ pub(crate) fn tombstone_file_name(data_type: &str, id: &str) -> String {
     )
 }
 
+/// MKCOL（RFC 4918）：在远端创建集合。
+///
+/// 这是 WebDAV 的基础方法，坚果云 / 群晖 / Nextcloud / Apache mod_dav / nginx dav
+/// 都支持；不像 PROPFIND 那样各方实现差异大。
+fn mkcol_method() -> Method {
+    Method::from_bytes(b"MKCOL").expect("MKCOL 是合法的 HTTP 方法字面量")
+}
+
 fn default_manifest() -> PersonalSyncManifest {
     let now = now_millis();
     PersonalSyncManifest {
@@ -561,7 +612,7 @@ fn reply_snippet(reply: &HttpReply) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
     use futures::future::BoxFuture;
@@ -576,13 +627,16 @@ mod tests {
     use crate::cloud_sync::personal::{PersonalSyncStore, SyncStoreError};
     use crate::cloud_sync::personal::test_support::test_record;
 
-    /// 一个只实现 GET / PUT 的内存版 WebDAV 服务端。
+    /// 一个实现 GET / PUT / MKCOL 的内存版 WebDAV 服务端。
     ///
-    /// 这样测试跑的是真实的 store 逻辑（索引读写、版本判定、错误翻译），
-    /// 只是把网络层换成了字典。
+    /// 这样测试跑的是真实的 store 逻辑（建集合、索引读写、版本判定、错误翻译），
+    /// 只是把网络层换成了字典。集合语义也照搬 RFC 4918：集合不存在时
+    /// MKCOL 返回 201，PUT 返回 409。
     #[derive(Default)]
     struct MemoryWebDav {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        /// 已创建的集合；空表示集合尚不存在。
+        collections: Arc<Mutex<HashSet<String>>>,
         /// 非 None 时所有请求直接返回这个状态码，用来模拟 401 / 500。
         forced_status: Option<u16>,
         /// 服务端错误响应体。
@@ -594,6 +648,13 @@ mod tests {
     impl MemoryWebDav {
         fn new() -> Arc<MemoryWebDav> {
             Arc::new(Self::default())
+        }
+
+        /// 集合已存在的服务端。
+        fn with_collection() -> Arc<MemoryWebDav> {
+            let server = Self::new();
+            server.collections.lock().expect("lock").insert(String::new());
+            server
         }
 
         fn failing(status: u16) -> Arc<MemoryWebDav> {
@@ -610,6 +671,10 @@ mod tests {
 
         fn contains(&self, name: &str) -> bool {
             self.files.lock().expect("files lock").contains_key(name)
+        }
+
+        fn collection_exists(&self) -> bool {
+            !self.collections.lock().expect("collections lock").is_empty()
         }
 
         fn count(&self) -> usize {
@@ -668,6 +733,23 @@ mod tests {
                     return build_response(status, error_body.into_bytes());
                 }
 
+                let mut collections = server.collections.lock().expect("collections lock");
+
+                // 集合层：URL 以 / 结尾且没有文件名，就是对集合本身操作。
+                if method == "MKCOL" {
+                    return if collections.insert(path.clone()) {
+                        build_response(StatusCode::CREATED.as_u16(), Vec::new())
+                    } else {
+                        build_response(StatusCode::METHOD_NOT_ALLOWED.as_u16(), Vec::new())
+                    };
+                }
+
+                // RFC 4918：父集合不存在时 PUT 返回 409（不会凭空创建中间目录）；
+                // 而 GET 只会得到 404，客户端据此认为「文件还不存在」。
+                if method == "PUT" && !collections.contains(&parent_of(&path)) {
+                    return build_response(StatusCode::CONFLICT.as_u16(), Vec::new());
+                }
+
                 let file_name = path.rsplit('/').next().unwrap_or_default().to_string();
                 let mut files = server.files.lock().expect("files lock");
 
@@ -692,6 +774,14 @@ mod tests {
 
         fn proxy(&self) -> Option<&gpui::http_client::Url> {
             None
+        }
+    }
+
+    /// 取路径的父集合部分。`/dav/navop/record-x.json` -> `/dav/navop/`
+    fn parent_of(path: &str) -> String {
+        match path.rfind('/') {
+            Some(index) => path[..=index].to_string(),
+            None => "/".to_string(),
         }
     }
 
@@ -997,19 +1087,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_methods_explain_the_directory_hint() {
+    async fn unsupported_methods_explain_the_writable_directory_hint() {
         let server = MemoryWebDav::failing(405);
         let result = store(&server).probe().await;
 
         match result {
-            Err(SyncStoreError::WebdavStatus { status, message }) => {
-                assert_eq!(405, status);
+            Err(SyncStoreError::DirectoryUnavailable(message)) => {
+                assert!(message.contains("405"), "应带上状态码：{message}");
                 assert!(
-                    message.contains("WebDAV 地址指向一个可写目录"),
-                    "message: {message}"
+                    message.contains("写权限"),
+                    "提示应说明需要写权限：{message}"
                 );
             }
-            other => panic!("期望 WebdavStatus，实际为 {other:?}"),
+            other => panic!("期望 DirectoryUnavailable，实际为 {other:?}"),
         }
     }
 
@@ -1018,7 +1108,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn only_basic_http_methods_are_used() {
+    async fn only_basic_webdav_methods_are_used() {
         let server = MemoryWebDav::new();
         let store = store(&server);
 
@@ -1035,7 +1125,50 @@ mod tests {
         let mut methods = server.methods_seen();
         methods.sort();
         methods.dedup();
-        assert_eq!(vec!["GET".to_string(), "PUT".to_string()], methods);
+        // MKCOL 只在集合缺失时发一次；刻意不使用 PROPFIND / PROPPATCH。
+        assert_eq!(
+            vec!["GET".to_string(), "MKCOL".to_string(), "PUT".to_string()],
+            methods
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_creates_the_target_collection_with_mkcol() {
+        let server = MemoryWebDav::new();
+        assert!(!server.collection_exists(), "集合初始应不存在");
+
+        store(&server).probe().await.expect("probe");
+
+        assert!(server.collection_exists(), "probe 应先用 MKCOL 建集合");
+        assert!(server.contains(MANIFEST_FILE));
+    }
+
+    #[tokio::test]
+    async fn existing_collection_is_not_recreated() {
+        let server = MemoryWebDav::with_collection();
+        store(&server).probe().await.expect("probe");
+
+        let methods = server.methods_seen();
+        assert_eq!(
+            0,
+            methods.iter().filter(|method| method.as_str() == "MKCOL").count(),
+            "集合已存在时不应再发 MKCOL，实际方法序列：{methods:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_directory_reports_directory_unavailable_with_a_hint() {
+        // 服务端一律 409：MKCOL 被当成「已存在」放行，PUT 仍失败。
+        let server = MemoryWebDav::failing(409);
+        let result = store(&server).probe().await;
+
+        match result {
+            Err(SyncStoreError::DirectoryUnavailable(message)) => {
+                assert!(message.contains("目标目录不存在"), "message: {message}");
+                assert!(message.contains("创建"), "提示应告诉用户怎么建目录：{message}");
+            }
+            other => panic!("期望 DirectoryUnavailable，实际为 {other:?}"),
+        }
     }
 
     #[tokio::test]
