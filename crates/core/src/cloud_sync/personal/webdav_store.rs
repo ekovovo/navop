@@ -267,7 +267,10 @@ impl WebDavSyncStore {
         let bytes = serde_json::to_vec_pretty(value)?;
         // PUT 不会创建中间目录，必须先把集合建出来。
         self.ensure_collection().await?;
-        let reply = self.send(Method::PUT, file_name, Some(bytes)).await?;
+        // 首次尝试 clone 一份：失败重试时还要用同一份 payload。
+        let reply = self
+            .send(Method::PUT, file_name, Some(bytes.clone()))
+            .await?;
         if reply.is_success() {
             return Ok(());
         }
