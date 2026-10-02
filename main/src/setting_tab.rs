@@ -1092,35 +1092,34 @@ fn sync_setting_group(
     ];
 
     if webdav_selected {
+        // 与「同步路径」项同构：SettingItem::new + SettingField::render + .description。
+        // 不把标签只放进 keywords，否则搜索能命中但界面没有标题。
         items.push(
-            SettingItem::render(move |options, window, cx| {
-                render_personal_sync_webdav_url_field(options, window, cx)
-            })
-            .description(t!("Settings.Sync.webdav_url_desc").to_string())
-            .keywords([
-                t!("Settings.Sync.webdav_url").to_string(),
-                t!("Settings.Sync.backend").to_string(),
-            ]),
+            SettingItem::new(
+                t!("Settings.Sync.webdav_url"),
+                SettingField::render(move |options, window, cx| {
+                    render_personal_sync_webdav_url_field(options, window, cx)
+                }),
+            )
+            .description(t!("Settings.Sync.webdav_url_desc").to_string()),
         );
         items.push(
-            SettingItem::render(move |options, window, cx| {
-                render_personal_sync_webdav_username_field(options, window, cx)
-            })
-            .description(t!("Settings.Sync.webdav_username_desc").to_string())
-            .keywords([
-                t!("Settings.Sync.webdav_username").to_string(),
-                t!("Settings.Sync.backend").to_string(),
-            ]),
+            SettingItem::new(
+                t!("Settings.Sync.webdav_username"),
+                SettingField::render(move |options, window, cx| {
+                    render_personal_sync_webdav_username_field(options, window, cx)
+                }),
+            )
+            .description(t!("Settings.Sync.webdav_username_desc").to_string()),
         );
         items.push(
-            SettingItem::render(move |options, window, cx| {
-                render_personal_sync_webdav_password_field(options, window, cx)
-            })
-            .description(t!("Settings.Sync.webdav_password_desc").to_string())
-            .keywords([
-                t!("Settings.Sync.webdav_password").to_string(),
-                t!("Settings.Sync.backend").to_string(),
-            ]),
+            SettingItem::new(
+                t!("Settings.Sync.webdav_password"),
+                SettingField::render(move |options, window, cx| {
+                    render_personal_sync_webdav_password_field(options, window, cx)
+                }),
+            )
+            .description(t!("Settings.Sync.webdav_password_desc").to_string()),
         );
     } else {
         // WebDAV 不用本地目录，填了也会被忽略。
@@ -1459,7 +1458,7 @@ fn bind_webdav_input(
         )),
         cx,
         move |window, cx| {
-            let input = cx.new(build);
+            let input = cx.new(|cx| build(window, cx));
             // `subscribe` 的回调要求 `'static`，而 `field` 是外层闭包的局部变量。
             // 必须 `move` 按值捕获（`&'static str` 本身是 Copy + 'static），
             // 否则闭包按引用借用它，触发 E0373。
