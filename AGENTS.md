@@ -323,6 +323,13 @@
 
 #### 已沉淀经验
 
+- **标题**：发布构建会被 Rust 工具链漂移打断，`setup-rust-toolchain` 默认带 `-D warnings`
+- **触发信号**：CI 发布构建报 `-D deprecated` / `-D warnings` 相关失败，且失败点在自己这次改动之外的既有代码里；典型如 `use of deprecated method ... fetch_update: renamed to try_update`。
+- **根因 / 约束**：`.github/workflows/release.yml` 调 `actions-rust-lang/setup-rust-toolchain@v1` 时没有覆盖 `rustflags`，而该 action 的**默认值就是 `-D warnings`**；工具链又未固定版本（跟随最新 stable）。因此 Rust 一次常规弃用就会让发布构建整体变红。仓库自身 `[workspace.lints.rust]` 只设了 `unexpected_cfgs`，`-D warnings` 不来自仓库配置。
+- **正确做法**：按编译器给出的建议改掉弃用点（保持签名与语义不变），不要为了绕过而给 workflow 加 `rustflags: ""` —— 那会永久关闭整个发布链路的告警。修完顺手 `grep -rn "<弃用 API>" --include=*.rs` 全仓扫一遍同类用法。
+- **验证方式**：`script/build-windows-rdp-probe.ps1` 是很好的快速反馈点——它在正式构建前就会 `cargo build/test` 编译 `one-core`、`windows-rdp-probe`、`windows_rdp_host`、`remote_desktop_view`；它通过后再看第 17 步 `Build release binary (Windows)`。
+- **适用范围**：所有走 release.yml 的发布构建（6 个平台都受影响）；新增平台或新 Rust stable 升级后优先怀疑这一类。
+
 - **标题**：扩展机制收敛时先做全仓 + 外部仓库死代码审计，`extension-api` 不是孤儿而是 WIT 契约宿主
 - **触发信号**：试图删除某个 extension-* crate 或“统一扩展机制”时，凭 `rg` 在 workspace 内没找到 `use extension_api` 就判定它是死 crate；或看到 `extension-host/src/runtime.rs` 的 `IpcExtensionRuntime`/`ComponentExtensionRuntime`/`ExtensionRuntimeFactory` 而以为它是统一运行时核心。
 - **根因 / 约束**：`extension-api` 的 Rust 代码确实无任何 crate 编译依赖，但它的 `wit/` 目录是 `extension-wasm` 全部 component bindings 的 WIT 源（9 处 `path: "../extension-api/wit"`），删除即破 wasm 组件路径；用户明确保留 wasm 时不能删。`extension-host/src/runtime.rs` 才是真死机制：零消费（workspace + 外部 `navop-extensions` 都不引），且是被 `extension-plugin-adapter::ActivationManager` 取代的废弃“统一 IPC/Component 运行时抽象”，其中 `ComponentExtensionRuntime` 是 TODO 占位。`crates/elasticsearch-provider` 非 workspace member、无人引用，是悬挂目录，但不在构建里。
