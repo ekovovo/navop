@@ -232,7 +232,7 @@ impl WebDavSyncStore {
     async fn upload(
         &self,
         file_name: &str,
-        value: &(impl Serialize + Sync),
+        value: &(impl Serialize + Sync + Send),
     ) -> Result<(), SyncStoreError> {
         let bytes = serde_json::to_vec_pretty(value)?;
         let reply = self.send(Method::PUT, file_name, Some(bytes)).await?;

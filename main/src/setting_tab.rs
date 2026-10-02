@@ -1385,7 +1385,9 @@ fn bind_webdav_input(
                         settings.personal_sync.webdav.username = value.trim().to_string()
                     }
                     // 密码不在 settings.json 里留明文：落盘前先加密。
-                    _ => settings.personal_sync.webdav.password = seal_webdav_password(&value),
+                    "password" => settings.personal_sync.webdav.password = seal_webdav_password(&value),
+                    // 显式兜底而非 `_ =>` 走密码分支：新增字段时不会被静默当成密码加密。
+                    _ => {}
                 });
             });
             WebDavInputState {
