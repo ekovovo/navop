@@ -2656,7 +2656,9 @@ mod tests {
         let mut integration = RuntimeShellIntegration::new(true);
         assert!(!integration.accepts_terminal_input());
 
-        assert!(release_stalled_shell_integration_handshake(&mut integration));
+        assert!(release_stalled_shell_integration_handshake(
+            &mut integration
+        ));
         assert!(
             integration.accepts_terminal_input(),
             "看门狗到期后用户输入必须立刻可发送"
@@ -2668,7 +2670,9 @@ mod tests {
 
         // 未请求注入（纯裸终端）的会话不适用看门狗。
         let mut integration = RuntimeShellIntegration::new(false);
-        assert!(!release_stalled_shell_integration_handshake(&mut integration));
+        assert!(!release_stalled_shell_integration_handshake(
+            &mut integration
+        ));
         assert!(integration.accepts_terminal_input());
     }
 
