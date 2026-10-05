@@ -4777,13 +4777,16 @@ mod tests {
     }
 
     #[test]
-    fn personal_sync_backend_options_include_folder_and_git() {
+    fn personal_sync_backend_options_include_all_backends() {
         let options = personal_sync_backend_options();
 
+        // 逐项精确比对（含顺序）：下拉里可选的后端必须与 `PersonalSyncBackendKind`
+        // 一一对应，新增后端时这里要同步补一行，否则 CI 会拦下来。
         assert_eq!(
             vec![
                 ("folder".into(), t!("Settings.Sync.Backend.folder").into()),
                 ("git".into(), t!("Settings.Sync.Backend.git").into()),
+                ("webdav".into(), t!("Settings.Sync.Backend.webdav").into()),
             ],
             options
         );
