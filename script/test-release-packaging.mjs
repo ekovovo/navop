@@ -1082,6 +1082,135 @@ test("R2 uploads are single-dispatch, revalidated, and verified after overwrite"
   assert.doesNotMatch(upload, /max-age=31536000, immutable/);
 });
 
+test("R2 keeps only the release it just uploaded", () => {
+  const upload = read(".github/workflows/upload-r2.yml");
+
+  // 清理必须排在上传与逐对象校验之后，而且不能总是执行：上传失败时一个对象
+  // 都不能删，否则桶里可能新旧两份都不完整。
+  assert.ok(
+    upload.indexOf("Prune older R2 releases") >
+      upload.indexOf("Upload update archives and manifest to R2"),
+  );
+  const pruneStep = workflowStep(upload, "Prune older R2 releases");
+  assert.doesNotMatch(pruneStep, /always\(\)/);
+  assert.doesNotMatch(pruneStep, /continue-on-error/);
+  assert.match(
+    pruneStep,
+    /if: \$\{\{ steps\.r2_config\.outputs\.skip != 'true' && steps\.release\.outputs\.skip != 'true' \}\}/,
+  );
+  // 只动 releases/<tag>/：updates/latest.json 是更新入口，任何时候都不能删。
+  assert.match(pruneStep, /prefix="releases"/);
+  assert.doesNotMatch(pruneStep, /updates\//);
+  // 只有稳定版本号才清理，预发布不能把上一个稳定版本的安装包带走。
+  assert.match(pruneStep, /=\~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]/);
+  assert.match(pruneStep, /Skipping R2 prune for non-stable release tag/);
+
+  const pruneRun = pruneStep
+    .match(/run: \|\n([\s\S]*)/)?.[1]
+    .split("\n")
+    .map((line) => line.replace(/^ {10}/, ""))
+    .join("\n");
+  assert.ok(pruneRun, "prune step must have a run script");
+
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "navop-r2-prune-"));
+  const statePath = path.join(fixtureDir, "bucket");
+  const deletedPath = path.join(fixtureDir, "deleted");
+  const fakeAws = path.join(fixtureDir, "aws");
+
+  // 假 aws 只实现这一步用到的两条命令：列出版本前缀、递归删掉一个前缀。删除
+  // 会真的从 fixture 里拿掉版本，所以脚本最后的复查也一起被验证到。
+  fs.writeFileSync(
+    fakeAws,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-} \${2:-}" in
+  "s3api list-objects-v2")
+    grep -v '^$' "\${FAKE_R2_STATE}" | while read -r tag; do
+      printf 'releases/%s/\\n' "\$tag"
+    done
+    ;;
+  "s3 rm")
+    target=""
+    for argument in "\$@"; do
+      case "\$argument" in s3://*) target="\$argument" ;; esac
+    done
+    key="\${target#s3://*/}"
+    key="\${key%/}"
+    echo "\$key" >> "\${FAKE_R2_DELETED}"
+    grep -Fxv "\${key#releases/}" "\${FAKE_R2_STATE}" > "\${FAKE_R2_STATE}.tmp"
+    mv "\${FAKE_R2_STATE}.tmp" "\${FAKE_R2_STATE}"
+    ;;
+  *)
+    echo "unexpected aws invocation: \$*" >&2
+    exit 42
+    ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+
+  const runPrune = (tags, releaseTag = "v0.19.5") => {
+    fs.writeFileSync(statePath, `${tags.join("\n")}\n`);
+    fs.writeFileSync(deletedPath, "");
+    const result = spawnSync("bash", ["-c", pruneRun], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fixtureDir}:${process.env.PATH}`,
+        FAKE_R2_STATE: statePath,
+        FAKE_R2_DELETED: deletedPath,
+        CLOUDFLARE_ACCOUNT_ID: "test-account",
+        CLOUDFLARE_R2_BUCKET: "test-bucket",
+        RELEASE_TAG: releaseTag,
+      },
+    });
+    return {
+      result,
+      remaining: fs
+        .readFileSync(statePath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean),
+      deleted: fs
+        .readFileSync(deletedPath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .sort(),
+    };
+  };
+
+  try {
+    const pruned = runPrune(["v0.19.5", "v0.19.4", "v0.19.3"]);
+    assert.equal(pruned.result.status, 0, pruned.result.stderr);
+    assert.deepEqual(pruned.remaining, ["v0.19.5"]);
+    assert.deepEqual(pruned.deleted, [
+      "releases/v0.19.3",
+      "releases/v0.19.4",
+    ]);
+    assert.match(pruned.result.stdout, /R2 now keeps only releases\/v0\.19\.5\//);
+
+    // 本次 tag 不在桶里（上传其实没成功）时，一个旧版本都不能删。
+    const missing = runPrune(["v0.19.4", "v0.19.3"]);
+    assert.notEqual(missing.result.status, 0);
+    assert.match(missing.result.stdout, /Refusing to prune/);
+    assert.deepEqual(missing.deleted, []);
+    assert.deepEqual(missing.remaining, ["v0.19.4", "v0.19.3"]);
+
+    // 预发布不清理，既有稳定版本原样保留。
+    const prerelease = runPrune(["v0.19.5", "v0.19.4"], "v0.20.0-rc.1");
+    assert.equal(prerelease.result.status, 0, prerelease.result.stderr);
+    assert.deepEqual(prerelease.deleted, []);
+    assert.deepEqual(prerelease.remaining, ["v0.19.5", "v0.19.4"]);
+    assert.match(
+      prerelease.result.stdout,
+      /Skipping R2 prune for non-stable release tag/,
+    );
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("CNB release synchronization replaces moved tags before syncing assets", () => {
   const sync = read(".github/workflows/sync-cnb-release-assets.yml");
 
