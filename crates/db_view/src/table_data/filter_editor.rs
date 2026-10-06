@@ -929,7 +929,10 @@ pub fn create_simple_editor(
             // `EditorState` 恒为多行（`EditorMode::MULTI_LINE`），旧版 `InputState`
             // 的 `.multi_line(false)` 已无对应 API，用 `submit_on_enter` 等价表达。
             .submit_on_enter(true)
-            .clean_on_escape();
+            .clean_on_escape()
+            // 行数写在 layout mode 上，代码编辑器的默认值是 2 行；不给这一行，
+            // 过滤条的外层容器是 auto 高度，会直接退化成 2 行的下界高度。
+            .rows(1);
         editor
     });
 
@@ -1208,6 +1211,66 @@ mod tests {
             cx.read(|cx| editor.read(cx).get_text_from_app(cx)),
             "Shift+Enter 应保留换行"
         );
+    }
+
+    /// `data_grid` 里包住过滤条的那一层，原样搬来量高度。
+    struct FilterBarRow(Entity<TableFilterEditor>);
+
+    impl Render for FilterBarRow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .px_2()
+                .py_1()
+                .child(self.0.clone())
+        }
+    }
+
+    /// 回归：过滤条输入框保持单行高度。
+    ///
+    /// `EditorState` 恒为多行且默认占 2 行高度，而过滤条外层是 auto 高度容器，
+    /// 不给它显式行数就会退化成 2 行的下界高度。
+    #[gpui::test]
+    fn filter_editor_keeps_a_single_line_height(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let (window, filter_editor) = cx.update(|cx| {
+            let mut filter_editor = None;
+            let window = cx
+                .open_window(WindowOptions::default(), |window, cx| {
+                    let entity = cx.new(|cx| TableFilterEditor::new(window, cx));
+                    filter_editor = Some(entity.clone());
+                    cx.new(|_| FilterBarRow(entity))
+                })
+                .expect("open table filter editor test window");
+            (window, filter_editor.expect("table filter editor"))
+        });
+
+        let cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        for editor in [
+            filter_editor.read_with(&cx, |editor, _| editor.where_editor.clone()),
+            filter_editor.read_with(&cx, |editor, _| editor.order_by_editor.clone()),
+        ] {
+            let input = editor.read_with(&cx, |editor, _| editor.editor.clone());
+            let (line_height, bounds) = cx.read(|cx| {
+                let input = input.read(cx);
+                (
+                    input.line_height().expect("line height"),
+                    input.text_bounds().expect("laid out"),
+                )
+            });
+            assert!(
+                bounds.size.height < line_height * 2.0,
+                "过滤条输入框不应再占两行高：高度 {:?}，单行 {:?}",
+                bounds.size.height,
+                line_height,
+            );
+        }
     }
 
     /// 回归：过滤条件 completion 扫描必须按 UTF-8 字符边界回退。
