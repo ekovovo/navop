@@ -180,25 +180,18 @@ test("Linux publishes one package per architecture plus a separate GPU dependenc
   // the plain default build on all three platforms. The guard for that lives in
   // its own test below.
   assert.doesNotMatch(build, /--no-default-features/);
-  // The one deliberate exception is the Intel Mac Touch Bar workaround. It has to
-  // stay the *only* feature this step ever names, be handed to the compile through
-  // the same variable, and stay behind the target check: a workaround that leaks
-  // onto ARM Macs, Windows or Linux would trade a crash we can reproduce for a
-  // memory cost we cannot explain.
-  assert.match(
+  // The Touch Bar workaround feature is switched off again: upstream zed#65186 fixed the
+  // root cause (accesskit's plain Adapter instead of the dynamically subclassed content
+  // view) and that fix ships in gpui-pre fork-0.3.124, so every platform closes windows by
+  // destroying them. If the fix is ever disproven on real hardware, re-adding
+  // `--features macos-touchbar-window-hide` for the affected target here is the whole
+  // change; the mechanism is still in the code behind `HIDE_WINDOWS_ON_CLOSE`.
+  assert.doesNotMatch(
     build,
-    /if \[ "\$\{\{ matrix\.target \}\}" = "x86_64-apple-darwin" \]; then\s*\n\s*extra_features="--features macos-touchbar-window-hide"/,
+    /--features/,
+    "the build step must not name features: the Intel Mac Touch Bar workaround is disabled now that upstream zed#65186 landed",
   );
-  assert.equal(
-    (build.match(/--features/g) ?? []).length,
-    1,
-    "the build step must name features in exactly one place: the x86_64 macOS-only variable",
-  );
-  assert.equal(
-    (build.match(/\$extra_features/g) ?? []).length,
-    2,
-    "both compile commands must consume the feature variable: a platform that silently loses it would ship the un-fixed binary",
-  );
+  assert.doesNotMatch(build, /extra_features/);
   assert.match(
     build,
     /cargo build --release -p main --target "\$\{\{ matrix\.target \}\}"/,
