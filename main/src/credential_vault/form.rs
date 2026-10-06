@@ -14,6 +14,7 @@ pub(super) struct CredentialFormValues {
     pub passphrase: String,
     pub ssh_expect: SshAccountExpect,
     pub sync_enabled: bool,
+    pub forward_to_agent: bool,
 }
 
 pub(crate) struct CredentialForm {
@@ -31,6 +32,7 @@ pub(crate) struct CredentialForm {
     pub(super) password_expect_input: Entity<InputState>,
     pub(super) password_send_input: Entity<InputState>,
     pub(super) sync_enabled: bool,
+    pub(super) forward_to_agent: bool,
 }
 
 impl CredentialForm {
@@ -131,6 +133,9 @@ impl CredentialForm {
             cx,
         );
         let sync_enabled = existing.as_ref().is_some_and(|entry| entry.sync_enabled);
+        let forward_to_agent = existing
+            .as_ref()
+            .is_some_and(|entry| entry.forward_to_agent);
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -147,6 +152,7 @@ impl CredentialForm {
             password_expect_input,
             password_send_input,
             sync_enabled,
+            forward_to_agent,
         }
     }
 
@@ -181,6 +187,7 @@ impl CredentialForm {
                 },
             },
             sync_enabled: self.sync_enabled,
+            forward_to_agent: self.forward_to_agent,
         }
     }
 }
@@ -230,6 +237,7 @@ pub(super) fn build_entry(
     entry.passphrase = optional_trimmed(values.passphrase);
     entry.ssh_expect = normalize_ssh_expect(values.ssh_expect)?;
     entry.sync_enabled = values.sync_enabled;
+    entry.forward_to_agent = values.forward_to_agent;
     Ok(entry)
 }
 
@@ -307,6 +315,7 @@ mod tests {
                 },
             },
             sync_enabled: true,
+            forward_to_agent: false,
         }
     }
 

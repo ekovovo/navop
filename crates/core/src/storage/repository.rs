@@ -1071,6 +1071,8 @@ mod tests {
                 icon: None,
                 icon_file_path: None,
                 account_expect: Default::default(),
+                forward_agent: None,
+                agent_forward_key: None,
             },
             None,
         )
@@ -1523,7 +1525,7 @@ mod tests {
         let mut connection = ssh_connection("sensitive-readable");
         let connection_id = repo.insert(&mut connection).expect("connection");
         let plaintext_params = serde_json::to_string(&SshParams {
-                remote_file: None,
+            remote_file: None,
             sftp_default_directory: None,
             disabled_jump_server: None,
             sftp_account: None,
@@ -1553,6 +1555,8 @@ mod tests {
             icon: None,
             icon_file_path: None,
             account_expect: Default::default(),
+            forward_agent: None,
+            agent_forward_key: None,
         })
         .expect("serialize SSH params");
         conn.with_connection(|conn| {

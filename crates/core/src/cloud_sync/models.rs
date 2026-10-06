@@ -367,4 +367,11 @@ pub struct CredentialPlainData {
     pub ssh_expect: crate::storage::SshAccountExpect,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
+    /// 私钥是否应被加入本地 ssh-agent 并通过 ForwardAgent 转发给远端。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forward_to_agent: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
