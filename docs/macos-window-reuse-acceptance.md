@@ -1,8 +1,12 @@
 # macOS「关闭即隐藏」窗口复用 · 内部验收方案
 
-适用范围：打包时开了 `macos-touchbar-window-hide` 的 macOS 构建（当前发布流水线只给
-`x86_64-apple-darwin` 打开）。这套机制现在的定位是**客户可用的临时方案**：把「关闭即销毁」
-换成「关闭即隐藏」，代价是隐藏的原生窗口一直占着 `NSWindow` / `CAMetalLayer`。
+适用范围：打包时传了 `macos-touchbar-window-hide` 的 macOS 构建。该开关现在**已关闭**
+（上游 zed#65186 修掉了根因，随 gpui-pre fork-0.3.124 进来；见
+`docs/macos-memory-investigation.md` §10.13），所以下面这套行为当前不会在任何构建上生效，
+本文与它依赖的契约测试原样保留，供重新打开开关时验收使用。
+
+这套机制当时的定位是**客户可用的临时方案**：把「关闭即销毁」换成「关闭即隐藏」，
+代价是隐藏的原生窗口一直占着 `NSWindow` / `CAMetalLayer`。
 
 本文回答一个问题：**这个代价是不是受控、可测、有界的**。不是「有没有泄漏」的学术问题 ——
 是「下一轮能不能交付」的准入条件。
@@ -74,8 +78,8 @@ grep popup_lifecycle "$LOG" | tail -40
 
 ## 3. 场景矩阵
 
-每一条都在**带 Touch Bar 的 macOS 实机**上跑（Intel 用发布包即可；Apple Silicon 的 13 英寸
-MacBook Pro 需要自己按 `--features macos-touchbar-window-hide` 构建一个包）。每条开始前先记
+每一条都在**带 Touch Bar 的 macOS 实机**上跑（前提：给对应 target 重新传
+`--features macos-touchbar-window-hide` 构建一个包；开关当前已关闭）。每条开始前先记
 一次基线（`live_windows` / `reusable_windows` / `parked_windows` / `live_sessions`）。
 
 ### S1 同一目标重复开关 ×100

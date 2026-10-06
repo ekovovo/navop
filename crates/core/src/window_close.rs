@@ -97,11 +97,15 @@ pub fn request_close_window(window_handle: AnyWindowHandle, cx: &mut App) {
 
 /// 这个构建是否启用「关闭即隐藏」兜底（开着 `macos-touchbar-window-hide` 的 macOS 构建）。
 ///
-/// 当前只有 `x86_64-apple-darwin` 的发布包会在打包时打开这个 feature
-/// （见 `crates/core/Cargo.toml` 的 feature 说明与 `docs/macos-memory-investigation.md` §10）。
+/// **当前恒为 `false`，没有任何构建打开它**：上游 zed#65186 修掉了根因（accesskit 改用普通
+/// Adapter，不再动态替换内容视图的类），修复随 gpui-pre fork-0.3.124 进来，所以关闭窗口回到
+/// `remove_window()`。机制原样保留：重新打开时只需给对应 target 传
+/// `--features macos-touchbar-window-hide`（见 `crates/core/Cargo.toml` 的 feature 说明与
+/// `docs/macos-memory-investigation.md` §10），代码不用改。
+///
 /// 判据里**没有架构条件**：Touch Bar 也存在于 Apple Silicon 的 13 英寸 MacBook Pro
 /// （M1 2020 / M2 2022）上，那一侧需要同样保护时，给它的构建传同一个 feature 即可。
-/// 未启用时所有隐藏路径都必须退回原来的「关闭即销毁」，行为与加这套机制之前一致。
+/// 未启用时所有隐藏路径都退回「关闭即销毁」。
 ///
 /// 开关刻意收敛成**一个常量**而不是散落的 `#[cfg]`：弹窗（[`crate::popup_window`]）、
 /// 编辑器窗口（`remote_file_editor::editor_window_visibility`）都要读它，写死在各处
@@ -202,10 +206,9 @@ pub enum WindowCloseOutcome {
 ///
 /// # 生效范围
 ///
-/// 整套「隐藏不销毁」只在 [`HIDE_WINDOWS_ON_CLOSE`] 为真时生效，也就是打包时开了
-/// `macos-touchbar-window-hide` 的 macOS 构建（当前发布流水线只给 `x86_64-apple-darwin`
-/// 打开）。未启用时这个函数对弹窗的结果与普通窗口一样：`remove_window()`，即加这套机制
-/// 之前的行为。
+/// 整套「隐藏不销毁」只在 [`HIDE_WINDOWS_ON_CLOSE`] 为真时生效，也就是打包时给这个 target 传了
+/// `macos-touchbar-window-hide` 的 macOS 构建。该开关当前恒为 `false`（上游 zed#65186 已修掉
+/// 根因，见常量文档），所以这个函数眼下对弹窗的结果与普通窗口一样：`remove_window()`。
 ///
 /// # 弹窗一律不销毁
 ///
