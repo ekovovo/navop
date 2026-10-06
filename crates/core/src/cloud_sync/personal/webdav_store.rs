@@ -620,11 +620,11 @@ mod tests {
 
     use futures::future::BoxFuture;
     use futures::FutureExt;
-    use gpui::http_client::{AsyncBody, HttpClient, Request, Response, StatusCode};
+    use gpui::http_client::{AsyncBody, HttpClient, Request, Response, StatusCode, Url};
 
     use super::{
         INDEX_FILE, MANIFEST_FILE, WebDavCredentials, WebDavSyncStore, WebDavSyncIndex, entry_key,
-        record_file_name, tombstone_file_name,
+        normalize_base_url, record_file_name, tombstone_file_name,
     };
     use crate::cloud_sync::models::{CloudSyncData, data_type};
     use crate::cloud_sync::personal::{PersonalSyncStore, SyncStoreError};
@@ -654,9 +654,18 @@ mod tests {
         }
 
         /// 集合已存在的服务端。
+        ///
+        /// 集合在 mock 里是以 **URL 路径** 为键的（`MKCOL` 分支用 `req.uri().path()` 写入），
+        /// 所以这里必须塞 store 真正请求的那条路径。早先写死的 `String::new()`
+        /// 永远匹配不上，`MKCOL` 会一律回 201 —— 「服务端已存在该集合」这条分支
+        /// 从来没有被测到过。
         fn with_collection() -> Arc<MemoryWebDav> {
             let server = Self::new();
-            server.collections.lock().expect("lock").insert(String::new());
+            server
+                .collections
+                .lock()
+                .expect("lock")
+                .insert(collection_path());
             server
         }
 
@@ -818,6 +827,17 @@ mod tests {
     }
 
     const BASE_URL: &str = "https://dav.example.com/dav/navop";
+
+    /// `store()` 请求目标集合时落到 mock 上的 URL 路径。
+    ///
+    /// 复用 store 自己的归一化逻辑（补尾部 `/`）再取 path：mock 的集合键就是
+    /// `req.uri().path()`，两边必须用同一条路径，否则「集合已存在」根本模拟不出来。
+    fn collection_path() -> String {
+        Url::parse(&normalize_base_url(BASE_URL))
+            .expect("BASE_URL 可解析")
+            .path()
+            .to_string()
+    }
 
     fn record_for(id: &str) -> CloudSyncData {
         test_record(id, data_type::CONNECTION, 1, "checksum")
@@ -1148,14 +1168,26 @@ mod tests {
 
     #[tokio::test]
     async fn existing_collection_is_not_recreated() {
+        // 服务端上集合已存在。store 刻意不用 PROPFIND 探测目录，所以 probe 仍会发
+        // 一次 MKCOL；服务端回 405「已存在」，必须被当成「目录就绪」而不是错误。
         let server = MemoryWebDav::with_collection();
-        store(&server).probe().await.expect("probe");
+        let store = store(&server);
+        store
+            .probe()
+            .await
+            .expect("集合已存在时 probe 应成功（405 视为就绪）");
+
+        // 再写一条记录：`collection_ready` 已置位，不允许重复发 MKCOL。
+        store
+            .upsert_record(&record_for("cloud-1"), None)
+            .await
+            .expect("upsert");
 
         let methods = server.methods_seen();
         assert_eq!(
-            0,
+            1,
             methods.iter().filter(|method| method.as_str() == "MKCOL").count(),
-            "集合已存在时不应再发 MKCOL，实际方法序列：{methods:?}"
+            "集合已就绪后不应重复发 MKCOL，实际方法序列：{methods:?}"
         );
     }
 
