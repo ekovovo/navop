@@ -1025,6 +1025,28 @@ test("Windows MSI shortcuts use dedicated HKCU-keyed components", () => {
   }
 });
 
+test("Windows MSI shortcuts inherit the executable's embedded icon", () => {
+  const wix = read("installer/windows/navop.wxs");
+
+  // 快捷方式不能引用 Icon 表：MSI 会把 Icon 表里的图标另存成一份文件，该文件被清理或
+  // 图标缓存失效后，快捷方式图标会退化成通用白纸（issue #325）。目标 exe 已内嵌图标。
+  for (const id of ["StartMenuShortcut", "DesktopShortcut"]) {
+    const shortcut = wix.match(
+      new RegExp(`<Shortcut\\b[^>]*Id="${id}"[^>]*/>`),
+    );
+    assert.ok(shortcut, `missing ${id} shortcut`);
+    assert.doesNotMatch(shortcut[0], /\bIcon=/);
+  }
+
+  // 控制面板的卸载项仍走 Icon 表；快捷方式图标则由 exe 的内嵌资源提供。
+  assert.match(wix, /<Icon Id="NavopIcon" SourceFile="\$\(IconPath\)"\s*\/>/);
+  assert.match(wix, /<Property Id="ARPPRODUCTICON" Value="NavopIcon"\s*\/>/);
+  assert.match(
+    read("main/build.rs"),
+    /set_icon\("\.\.\/resources\/windows\/navop\.ico"\)/,
+  );
+});
+
 test("GitHub and R2 publish every installer while the updater manifest remains compatible", () => {
   const release = read(".github/workflows/release.yml");
   const upload = read(".github/workflows/upload-r2.yml");
@@ -1269,6 +1291,8 @@ test("Windows release validates the MSI installer with the shared validator", ()
   assert.match(validator, /DesktopShortcutRegistry/);
   assert.match(validator, /StartMenuShortcutRegistry/);
   assert.match(validator, /SELECT Component_ FROM Shortcut/);
+  assert.match(validator, /Assert-MsiEmptyValue/);
+  assert.match(validator, /SELECT Icon_ FROM Shortcut/);
   assert.match(validator, /SELECT KeyPath FROM Component/);
   assert.match(validator, /SELECT Root FROM Registry/);
   assert.match(validator, /\.Trim\(\)/);
