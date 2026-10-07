@@ -1125,9 +1125,20 @@ test("R2 keeps only the release it just uploaded", () => {
 set -euo pipefail
 case "\${1:-} \${2:-}" in
   "s3api list-objects-v2")
-    grep -v '^$' "\${FAKE_R2_STATE}" | while read -r tag; do
-      printf 'releases/%s/\\n' "\$tag"
+    # 必须带 delimiter，否则列出来的是对象而不是版本目录。
+    if [[ " $* " != *" --delimiter / "* ]]; then
+      echo "s3api list-objects-v2 without --delimiter: $*" >&2
+      exit 42
+    fi
+    # 跟真实 aws cli 一致：--output text 对扁平列表是「一行、tab 拼接」。
+    # 之前这里按一行一个写，恰好把真实现场的解析 bug 掩盖过去了。
+    separator=""
+    line=""
+    for tag in $(grep -v '^$' "\${FAKE_R2_STATE}"); do
+      line="\${line}\${separator}releases/\$tag/"
+      separator=\$'\t'
     done
+    [[ -z "\$line" ]] || printf '%s\\n' "\$line"
     ;;
   "s3 rm")
     target=""
