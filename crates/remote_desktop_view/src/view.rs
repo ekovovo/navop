@@ -60,6 +60,8 @@ mod surface;
 // sink are only constructed by the Windows native-RDP build.
 #[allow(dead_code)]
 mod windows_native;
+#[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+mod windows_native_composition;
 #[allow(dead_code)]
 mod windows_native_display;
 #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
@@ -254,6 +256,9 @@ struct WindowsNativePresentationInputs {
     scale_factor: f32,
     options: RemoteDesktopConnectionOptions,
     desktop_size: (u32, u32),
+    /// Surface the session is composed into, taken while the `Window` borrow is
+    /// available. `None` keeps the session as a plain child window.
+    composition: Option<gpui::WindowCompositionSurface>,
 }
 
 /// Failure modes of the borrow-free COM preparation stage (Phase 2).
@@ -331,11 +336,13 @@ fn prepare_windows_native_connection(
         scale_factor,
         options,
         desktop_size,
+        composition,
     } = inputs;
 
     let mut native = windows_native::WindowsNativeAdapter::create_with_owner(
         owner.map_err(WindowsNativePrepareFailure::Create)?,
         generation,
+        composition,
     )
     .map_err(WindowsNativePrepareFailure::Create)?;
     if let Err(error) = native.update_bounds(bounds, point(px(0.0), px(0.0)), scale_factor) {
@@ -1615,6 +1622,9 @@ impl RemoteDesktopView {
             scale_factor: window.scale_factor(),
             desktop_size: windows_native_policy::initial_desktop_size(&self.options.rdp, size),
             options: self.options.clone(),
+            // Taken here rather than in the COM stage: `enable_window_composition`
+            // needs the GPUI window, which the borrow-free stage must not hold.
+            composition: windows_native::enable_composition_surface(window),
         })
     }
 
