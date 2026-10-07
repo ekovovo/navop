@@ -12,6 +12,7 @@ use super::find::{
     resolve_find, row_highlight_ranges, row_matches, scroll_target_for_match,
 };
 use super::selection::{CellCoord, TableSelection};
+use super::tsv::{encode_tsv_rows, parse_tsv_rows};
 use super::*;
 use crate::edit_table::filter_panel::FilterPanel;
 use gpui::{
@@ -2314,17 +2315,12 @@ where
             return;
         }
 
-        // 转换为 TSV 格式（Tab 分隔，与 Excel 兼容）
-        let text = data
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.as_deref().unwrap_or("\\N"))
-                    .collect::<Vec<_>>()
-                    .join("\t")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // 转换为 TSV 格式（Tab 分隔，与 Excel 兼容），含分隔符/引号的值会被转义
+        let text = encode_tsv_rows(data.iter().map(|row| {
+            row.iter()
+                .map(|cell| cell.as_deref().unwrap_or("\\N"))
+                .collect::<Vec<_>>()
+        }));
 
         // 写入剪贴板
         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -2351,11 +2347,8 @@ where
             return;
         };
 
-        // 解析 TSV 数据
-        let data: Vec<Vec<String>> = text
-            .lines()
-            .map(|line| line.split('\t').map(|s| s.to_string()).collect())
-            .collect();
+        // 解析 TSV 数据（与复制侧的转义对称）
+        let data: Vec<Vec<String>> = parse_tsv_rows(&text);
 
         if data.is_empty() {
             return;

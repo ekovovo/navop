@@ -8,6 +8,7 @@ pub(crate) mod loading;
 mod resize_handle_tests;
 pub mod selection;
 mod state;
+pub mod tsv;
 
 use std::collections::HashSet;
 
