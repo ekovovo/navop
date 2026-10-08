@@ -1,7 +1,7 @@
 use crate::cloud_sync::models::data_type;
 use crate::cloud_sync::personal::test_support::test_record;
 use crate::cloud_sync::personal::{
-    DirectorySyncStore, PersonalSyncStore, SyncStoreError, SyncStoreHealth,
+    DirectorySyncStore, PersonalSyncStore, SyncDeviceId, SyncStoreError, SyncStoreHealth,
 };
 
 #[tokio::test]
@@ -177,4 +177,107 @@ async fn tombstone_advances_version() {
 
     assert_eq!(stored.version + 1, records[0].version);
     assert!(records[0].deleted_at.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// 同步互斥
+// ---------------------------------------------------------------------------
+
+/// 锁文件必须落在同步包之外：Git 后端用 `git add .onetcli-sync` 提交整个包，
+/// 放到包里会被提交、被另一台机器拉到。
+#[tokio::test]
+async fn lock_file_lives_outside_the_sync_package_and_is_removed_on_release() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = DirectorySyncStore::new(temp.path().to_path_buf());
+    let lock_path = temp.path().join(".onetcli-sync.lock");
+
+    let lock = store
+        .acquire_lock(&SyncDeviceId("first".to_string()))
+        .await
+        .expect("acquire succeeds");
+
+    assert!(lock_path.exists(), "持锁期间应存在锁文件");
+    assert!(
+        !temp.path().join(".onetcli-sync/lock").exists(),
+        "锁文件不能写进同步包"
+    );
+
+    drop(lock);
+    assert!(!lock_path.exists(), "释放后锁文件应被删掉");
+}
+
+/// 同一时刻只允许一个实例同步：第二个实例直接让路，互斥结束后立刻能拿到。
+#[tokio::test]
+async fn second_instance_is_refused_while_the_lock_is_held() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let holder = DirectorySyncStore::new(temp.path().to_path_buf());
+    let other = DirectorySyncStore::new(temp.path().to_path_buf());
+
+    let lock = holder
+        .acquire_lock(&SyncDeviceId("first".to_string()))
+        .await
+        .expect("first acquire succeeds");
+
+    let refused = other
+        .acquire_lock(&SyncDeviceId("second".to_string()))
+        .await;
+    assert!(matches!(refused, Err(SyncStoreError::LockTimeout)));
+
+    drop(lock);
+    other
+        .acquire_lock(&SyncDeviceId("second".to_string()))
+        .await
+        .expect("互斥结束后应立刻能拿到锁");
+}
+
+/// 持有者卡死（超过 TTL）时锁可以被接管；接管之后原持有者再释放，
+/// **不能**把后来者的锁删掉。
+#[tokio::test]
+async fn expired_lock_can_be_taken_over_and_the_old_holder_cannot_delete_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let holder = DirectorySyncStore::new(temp.path().to_path_buf());
+    let other = DirectorySyncStore::new(temp.path().to_path_buf());
+    let lock_path = temp.path().join(".onetcli-sync.lock");
+
+    let held = holder
+        .acquire_lock(&SyncDeviceId("first".to_string()))
+        .await
+        .expect("acquire succeeds");
+
+    // 模拟「持有者超过 TTL 没释放」：只改获取时间，nonce 保持原样。
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).expect("lock file readable"))
+            .expect("lock file is json");
+    value["acquired_at"] = serde_json::json!(0);
+    std::fs::write(&lock_path, serde_json::to_vec(&value).expect("json"))
+        .expect("rewrite lock file");
+
+    let stolen = other
+        .acquire_lock(&SyncDeviceId("second".to_string()))
+        .await
+        .expect("过期锁应能被接管");
+
+    // 原持有者这时才 drop：锁已经不是它的了，不能删。
+    drop(held);
+    assert!(lock_path.exists(), "被接管的锁不该被原持有者删掉");
+
+    drop(stolen);
+    assert!(!lock_path.exists(), "真正的持有者释放后才删锁文件");
+}
+
+/// 锁文件损坏时按「已过期」处理，否则一个坏文件会把同步永久卡死。
+#[tokio::test]
+async fn corrupt_lock_file_does_not_block_sync_forever() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = DirectorySyncStore::new(temp.path().to_path_buf());
+    std::fs::write(temp.path().join(".onetcli-sync.lock"), b"{ not json")
+        .expect("write corrupt lock file");
+
+    let lock = store
+        .acquire_lock(&SyncDeviceId("first".to_string()))
+        .await
+        .expect("坏锁文件必须能被接管");
+
+    drop(lock);
+    assert!(!temp.path().join(".onetcli-sync.lock").exists());
 }

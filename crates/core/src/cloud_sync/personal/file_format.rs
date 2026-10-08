@@ -1,6 +1,13 @@
 use std::path::{Path, PathBuf};
 
 pub const SYNC_PACKAGE_DIR: &str = ".onetcli-sync";
+/// 同步互斥锁文件名。
+///
+/// **刻意放在包目录之外**：Git 后端用 `git add .onetcli-sync` 提交整个包，锁文件落
+/// 在包里就会被提交、被另一台机器拉到，既产生噪声又会让对方误以为锁被持有。
+/// 放在 `<root>/.onetcli-sync.lock` 既能被「目录后端」的共享目录带着走（跨机器仍然
+/// 是同一个文件），又不会被 Git 后端纳入版本管理。
+pub const SYNC_LOCK_FILE: &str = ".onetcli-sync.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPackageLayout {
@@ -40,8 +47,14 @@ impl SyncPackageLayout {
         self.package_dir().join("state")
     }
 
+    /// 同步根目录（`package_dir()` 的父目录）。锁文件就放在这里。
+    pub fn root_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    /// 同步互斥锁文件路径（见 [`SYNC_LOCK_FILE`] 的说明：在包目录之外）。
     pub fn lock_path(&self) -> PathBuf {
-        self.package_dir().join("lock")
+        self.root.join(SYNC_LOCK_FILE)
     }
 
     pub fn package_dir(&self) -> PathBuf {
@@ -75,6 +88,15 @@ mod tests {
         assert_eq!(
             Path::new("/sync-root/.onetcli-sync/tombstones/connection/record-1.json"),
             layout.tombstone_path("connection", "record-1")
+        );
+        // 锁文件必须落在包目录之外，否则 Git 后端会把它 `git add .onetcli-sync` 提交上去。
+        assert_eq!(
+            Path::new("/sync-root/.onetcli-sync.lock"),
+            layout.lock_path()
+        );
+        assert!(
+            !layout.lock_path().starts_with(layout.package_dir()),
+            "锁文件不能位于同步包内"
         );
     }
 

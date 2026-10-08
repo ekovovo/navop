@@ -168,4 +168,12 @@ where
             Self::Webdav(store) => store.acquire_lock(owner).await,
         }
     }
+
+    async fn release_lock(&self, lock: &SyncStoreLock) -> Result<(), SyncStoreError> {
+        match self {
+            Self::Folder(store) => store.release_lock(lock).await,
+            Self::Git(store) => store.release_lock(lock).await,
+            Self::Webdav(store) => store.release_lock(lock).await,
+        }
+    }
 }

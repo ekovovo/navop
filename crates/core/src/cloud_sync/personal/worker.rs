@@ -202,7 +202,22 @@ where
 
     async fn run_pass(&self, events: HashSet<PersonalSyncEvent>) -> Result<(), SyncStoreError> {
         self.store.probe().await?;
-        let _lock = self.store.acquire_lock(&self.config.device_id).await?;
+        // 互斥：同一个同步包（同一台机器上的两个实例，或两台机器共享的目录 / WebDAV
+        // 目标）同一时刻只允许一个 pass 在做「读记录 → 改 → 写回」。
+        let lock = self.store.acquire_lock(&self.config.device_id).await?;
+        let result = self.run_locked_pass(events).await;
+        // 本地锁在 `Drop` 里就释放了；远端锁（WebDAV）必须显式释放，`Drop` 不能 await。
+        // 释放失败不影响本轮结果 —— 远端锁还有 TTL 兜底。
+        if let Err(error) = self.store.release_lock(&lock).await {
+            tracing::warn!(error = %error, "failed to release personal sync lock");
+        }
+        result
+    }
+
+    async fn run_locked_pass(
+        &self,
+        events: HashSet<PersonalSyncEvent>,
+    ) -> Result<(), SyncStoreError> {
         let local_items = self.local.list_items().await?;
         let remote_records = self.store.list_records(None, None).await?;
         // 挂起状态必须在处理删除之前取出来：墓碑处理要跳过已挂起的记录，

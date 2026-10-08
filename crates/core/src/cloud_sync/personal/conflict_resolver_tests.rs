@@ -264,9 +264,7 @@ impl PersonalSyncStore for FakeStore {
     }
 
     async fn acquire_lock(&self, owner: &SyncDeviceId) -> Result<SyncStoreLock, SyncStoreError> {
-        Ok(SyncStoreLock {
-            owner: owner.clone(),
-        })
+        Ok(SyncStoreLock::owned_by(owner.clone()))
     }
 }
 

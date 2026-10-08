@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -29,6 +30,26 @@ async fn worker_coalesces_events_and_runs_single_sync_pass() {
     worker.drain_once().await.expect("drain succeeds");
 
     assert_eq!(1, store.list_calls());
+}
+
+/// 远端锁（WebDAV）必须在 pass 结束后显式释放 —— `Drop` 里 await 不了。
+/// 这里刻意让这一轮以冲突收尾：释放必须发生在**错误路径**上，否则一次失败的 pass
+/// 会把锁一直挂到 TTL 过期，后续几轮同步全被拒掉。
+#[tokio::test]
+async fn worker_releases_store_lock_even_when_the_pass_fails() {
+    let store = FakePersonalSyncStore::with_records(vec![remote_record_conflicting()]);
+    let worker = PersonalSyncWorker::with_conflict_sink(
+        store.clone(),
+        FakePersonalSyncLocalSource::with_items(vec![local_record_conflicting()]),
+        FakeConflictSink::default(),
+        WorkerConfig::test(),
+    );
+
+    worker.enqueue(PersonalSyncEvent::FullScan);
+    worker.drain_once().await.expect_err("这一轮以冲突结束");
+
+    assert_eq!(1, store.acquire_calls());
+    assert_eq!(1, store.release_calls());
 }
 
 #[tokio::test]
@@ -436,6 +457,8 @@ struct FakePersonalSyncStore {
     records: Arc<Mutex<Vec<CloudSyncData>>>,
     list_calls: Arc<Mutex<usize>>,
     tombstoned: Arc<Mutex<Vec<(String, String)>>>,
+    locked: Arc<AtomicUsize>,
+    released: Arc<AtomicUsize>,
 }
 
 impl FakePersonalSyncStore {
@@ -444,11 +467,21 @@ impl FakePersonalSyncStore {
             records: Arc::new(Mutex::new(records)),
             list_calls: Arc::new(Mutex::new(0)),
             tombstoned: Arc::new(Mutex::new(Vec::new())),
+            locked: Arc::new(AtomicUsize::new(0)),
+            released: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn list_calls(&self) -> usize {
         *self.list_calls.lock().expect("list_calls lock")
+    }
+
+    fn acquire_calls(&self) -> usize {
+        self.locked.load(Ordering::SeqCst)
+    }
+
+    fn release_calls(&self) -> usize {
+        self.released.load(Ordering::SeqCst)
     }
 
     fn record_count(&self) -> usize {
@@ -505,9 +538,13 @@ impl PersonalSyncStore for FakePersonalSyncStore {
     }
 
     async fn acquire_lock(&self, owner: &SyncDeviceId) -> Result<SyncStoreLock, SyncStoreError> {
-        Ok(SyncStoreLock {
-            owner: owner.clone(),
-        })
+        self.locked.fetch_add(1, Ordering::SeqCst);
+        Ok(SyncStoreLock::owned_by(owner.clone()))
+    }
+
+    async fn release_lock(&self, _lock: &SyncStoreLock) -> Result<(), SyncStoreError> {
+        self.released.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 

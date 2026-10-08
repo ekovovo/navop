@@ -1,9 +1,10 @@
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cloud_sync::models::CloudSyncData;
 
@@ -11,6 +12,24 @@ use super::{
     APP_ID, PERSONAL_PROFILE_ID, PersonalSyncManifest, PersonalSyncStore, SUPPORTED_SCHEMA_VERSION,
     SyncDeviceId, SyncPackageLayout, SyncStoreError, SyncStoreLock, SyncStoreStatus, SyncTombstone,
 };
+
+/// 锁文件的过期时间。
+///
+/// 一次 pass 正常是秒级；超过这个时间还没释放，就认为持有者已经崩了，允许抢占。
+/// 只按 TTL 判断（不查 pid 存活）是为了避开平台相关的进程探活；代价是崩在 pass 中间
+/// 最多会让后续同步等这么久，换来的是实现足够简单、可验证。
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
+
+/// 锁文件内容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DirectorySyncLockFile {
+    owner: String,
+    /// 每次获取都不同。释放时用它确认「这把锁还是我的」——TTL 过期后锁可能已经被
+    /// 别的实例抢走，那时删掉文件会把对方的互斥一起破坏。
+    nonce: String,
+    pid: u32,
+    acquired_at: i64,
+}
 
 #[derive(Debug, Clone)]
 pub struct DirectorySyncStore {
@@ -73,6 +92,47 @@ impl DirectorySyncStore {
                 "stale version for record {id}"
             ))),
         }
+    }
+
+    /// 抢占同步锁。
+    ///
+    /// 目录后端（以及复用它的 Git 后端）可能被同一台机器上的两个 navop 实例指向，
+    /// 甚至被两台机器通过 Dropbox / iCloud 共享同一个目录；那时两边会并发地做
+    /// 「读记录 → 改 → 写回」，光靠单文件原子写保不住版本。这里用锁文件让后到者
+    /// 直接让路（[`SyncStoreError::LockTimeout`]），下一轮再试。
+    ///
+    /// 优先用 `create_new` 原子创建；已经被占时只有**确认过期**才抢占，抢占用
+    /// 「临时文件 + rename」再回读 nonce 确认 —— 两个实例同时判断出「已过期」时，
+    /// 只有回读到自己的 nonce 的那个才算抢到。
+    fn acquire_directory_lock(
+        &self,
+        owner: &SyncDeviceId,
+    ) -> Result<SyncStoreLock, SyncStoreError> {
+        fs::create_dir_all(self.layout.root_dir())?;
+        let path = self.layout.lock_path();
+        let nonce = super::new_lock_nonce();
+        let lock = DirectorySyncLockFile {
+            owner: owner.0.clone(),
+            nonce: nonce.clone(),
+            pid: std::process::id(),
+            acquired_at: now_millis(),
+        };
+
+        match create_lock_file(&path, &lock) {
+            Ok(()) => return Ok(owned_directory_lock(owner, path, nonce)),
+            Err(LockAttemptError::AlreadyHeld) => {}
+            Err(LockAttemptError::Io(error)) => return Err(error),
+        }
+
+        if !lock_is_stale(&path) {
+            return Err(SyncStoreError::LockTimeout);
+        }
+        write_json_atomically(&path, &lock)?;
+        if read_lock_nonce(&path).as_deref() != Some(nonce.as_str()) {
+            // 有人和我们同时抢：让路，别两边都以为自己在同步。
+            return Err(SyncStoreError::LockTimeout);
+        }
+        Ok(owned_directory_lock(owner, path, nonce))
     }
 }
 
@@ -143,10 +203,71 @@ impl PersonalSyncStore for DirectorySyncStore {
     }
 
     async fn acquire_lock(&self, owner: &SyncDeviceId) -> Result<SyncStoreLock, SyncStoreError> {
-        Ok(SyncStoreLock {
-            owner: owner.clone(),
-        })
+        self.acquire_directory_lock(owner)
     }
+}
+
+/// 抢锁失败的原因：已被占用（可继续判断是否过期），或真实的 IO 错误。
+enum LockAttemptError {
+    AlreadyHeld,
+    Io(SyncStoreError),
+}
+
+/// 原子创建锁文件：`create_new` 保证「文件已存在」时一定失败，不会覆盖别人的锁。
+fn create_lock_file(path: &Path, lock: &DirectorySyncLockFile) -> Result<(), LockAttemptError> {
+    let bytes =
+        serde_json::to_vec_pretty(lock).map_err(|error| LockAttemptError::Io(error.into()))?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(LockAttemptError::AlreadyHeld);
+        }
+        Err(error) => return Err(LockAttemptError::Io(error.into())),
+    };
+    file.write_all(&bytes)
+        .map_err(|error| LockAttemptError::Io(error.into()))
+}
+
+fn read_lock_nonce(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice::<DirectorySyncLockFile>(&bytes)
+        .ok()
+        .map(|lock| lock.nonce)
+}
+
+/// 锁是否已经过期。
+///
+/// 锁文件读不到或解析不出来时一律当作「已过期」：坏文件不该把同步永久卡死。
+fn lock_is_stale(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return true;
+    };
+    match serde_json::from_slice::<DirectorySyncLockFile>(&bytes) {
+        Ok(lock) => {
+            let age = now_millis().saturating_sub(lock.acquired_at);
+            age >= LOCK_STALE_AFTER.as_millis() as i64
+        }
+        Err(_) => true,
+    }
+}
+
+/// 构造一个「drop 时释放」的锁句柄。
+///
+/// 释放前先确认锁文件里的 nonce 还是自己的：TTL 过期后锁可能已经被别的实例抢走，
+/// 那时删掉文件会把对方的互斥破坏掉。
+fn owned_directory_lock(owner: &SyncDeviceId, path: PathBuf, nonce: String) -> SyncStoreLock {
+    SyncStoreLock::with_release(owner.clone(), move || {
+        if read_lock_nonce(&path).as_deref() != Some(nonce.as_str()) {
+            return;
+        }
+        if let Err(error) = fs::remove_file(&path) {
+            tracing::warn!(error = %error, "failed to release personal sync lock file");
+        }
+    })
 }
 
 fn default_manifest() -> PersonalSyncManifest {
