@@ -682,24 +682,30 @@ pub(crate) fn personal_sync_event_from_connection_event(
         }
         ConnectionDataEvent::ConnectionDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::CONNECTION.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::WorkspaceDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::WORKSPACE.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::CredentialDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::CREDENTIAL.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::ConnectionDeleted { cloud_id: None, .. }
         | ConnectionDataEvent::WorkspaceCreated { .. }

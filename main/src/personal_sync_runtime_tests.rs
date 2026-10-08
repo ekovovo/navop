@@ -103,10 +103,14 @@ fn personal_sync_maps_connection_delete_with_cloud_id_to_local_delete() {
         Some(PersonalSyncEvent::LocalDeleted {
             data_type: one_core::cloud_sync::data_type::CONNECTION.to_string(),
             cloud_id: "cloud-82".to_string(),
+            // 删除前那一行的同步基线必须原样带给 worker：它是判断「远端是否在本地
+            // 删除之后又被别的设备改过」的唯一依据。
+            last_synced_at: Some(1_700),
         }),
         personal_sync_event_from_connection_event(&ConnectionDataEvent::ConnectionDeleted {
             connection_id: 82,
             cloud_id: Some("cloud-82".to_string()),
+            last_synced_at: Some(1_700),
         })
     );
 }
@@ -117,10 +121,28 @@ fn personal_sync_maps_workspace_delete_with_cloud_id_to_local_delete() {
         Some(PersonalSyncEvent::LocalDeleted {
             data_type: one_core::cloud_sync::data_type::WORKSPACE.to_string(),
             cloud_id: "workspace-cloud-3".to_string(),
+            last_synced_at: None,
         }),
         personal_sync_event_from_connection_event(&ConnectionDataEvent::WorkspaceDeleted {
             workspace_id: 3,
             cloud_id: Some("workspace-cloud-3".to_string()),
+            last_synced_at: None,
+        })
+    );
+}
+
+#[test]
+fn personal_sync_maps_credential_delete_with_cloud_id_to_local_delete() {
+    assert_eq!(
+        Some(PersonalSyncEvent::LocalDeleted {
+            data_type: one_core::cloud_sync::data_type::CREDENTIAL.to_string(),
+            cloud_id: "credential-cloud-5".to_string(),
+            last_synced_at: Some(900),
+        }),
+        personal_sync_event_from_connection_event(&ConnectionDataEvent::CredentialDeleted {
+            credential_id: 5,
+            cloud_id: Some("credential-cloud-5".to_string()),
+            last_synced_at: Some(900),
         })
     );
 }
@@ -132,6 +154,7 @@ fn personal_sync_maps_deletes_without_cloud_id_and_workspace_changes_to_full_sca
         personal_sync_event_from_connection_event(&ConnectionDataEvent::ConnectionDeleted {
             connection_id: 82,
             cloud_id: None,
+            last_synced_at: Some(1_700),
         })
     );
     assert_eq!(
@@ -151,6 +174,7 @@ fn personal_sync_maps_deletes_without_cloud_id_and_workspace_changes_to_full_sca
         personal_sync_event_from_connection_event(&ConnectionDataEvent::WorkspaceDeleted {
             workspace_id: 3,
             cloud_id: None,
+            last_synced_at: None,
         })
     );
 }

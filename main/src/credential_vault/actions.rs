@@ -117,15 +117,19 @@ fn delete_credential(
         .get::<CredentialRepository>()
         .ok_or_else(|| t!("CredentialVault.repository_unavailable").to_string())
         .and_then(|repo| {
-            let cloud_id = repo
-                .get_summary(id)
-                .map_err(|error| error.to_string())?
-                .and_then(|summary| summary.cloud_id);
+            // 删之前把摘要读出来：`cloud_id` 用于删除云端数据，`last_synced_at`
+            // 是个人同步判断「远端是否在本地删除之后又被别的设备改过」的基线
+            // （详见 `ConnectionDataEvent::ConnectionDeleted`），行删掉就取不到了。
+            let summary = repo.get_summary(id).map_err(|error| error.to_string())?;
+            let cloud_id = summary
+                .as_ref()
+                .and_then(|summary| summary.cloud_id.clone());
+            let last_synced_at = summary.and_then(|summary| summary.last_synced_at);
             let outcome = repo.delete_checked(id).map_err(|error| error.to_string())?;
-            Ok((outcome, cloud_id))
+            Ok((outcome, cloud_id, last_synced_at))
         });
     match result {
-        Ok((DeleteCredentialOutcome::Deleted, cloud_id)) => {
+        Ok((DeleteCredentialOutcome::Deleted, cloud_id, last_synced_at)) => {
             if let Some(cloud_id) = &cloud_id {
                 // 本地凭据没了，遗留的冲突也就解不开了，删除时一并丢掉。
                 crate::personal_sync_runtime::forget_personal_conflict(
@@ -138,6 +142,7 @@ fn delete_credential(
                 ConnectionDataEvent::CredentialDeleted {
                     credential_id: id,
                     cloud_id,
+                    last_synced_at,
                 },
                 cx,
             );
@@ -148,7 +153,7 @@ fn delete_credential(
             );
             true
         }
-        Ok((DeleteCredentialOutcome::NotFound, _)) => {
+        Ok((DeleteCredentialOutcome::NotFound, _, _)) => {
             _ = view.update(cx, |view, cx| view.reload(cx));
             window.push_notification(
                 Notification::warning(t!("CredentialVault.already_deleted").to_string())
@@ -157,7 +162,7 @@ fn delete_credential(
             );
             true
         }
-        Ok((DeleteCredentialOutcome::Referenced(hits), _)) => {
+        Ok((DeleteCredentialOutcome::Referenced(hits), _, _)) => {
             window.push_notification(
                 Notification::error(format_reference_hits(&hits)).autohide(false),
                 cx,

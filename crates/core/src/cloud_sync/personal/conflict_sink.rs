@@ -176,7 +176,7 @@ mod tests {
 
     fn conflict(cloud_id: &str, data_type: &str) -> PersonalSyncRecordConflict {
         PersonalSyncRecordConflict {
-            local_id: format!("local-{cloud_id}"),
+            local_id: Some(format!("local-{cloud_id}")),
             cloud_id: cloud_id.to_string(),
             data_type: data_type.to_string(),
             conflict_type: crate::cloud_sync::personal::PersonalConflictType::BothModified,

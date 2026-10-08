@@ -14,8 +14,22 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PersonalSyncEvent {
     FullScan,
-    LocalChanged { data_type: String, local_id: String },
-    LocalDeleted { data_type: String, cloud_id: String },
+    LocalChanged {
+        data_type: String,
+        local_id: String,
+    },
+    /// 本地条目被删除。
+    ///
+    /// `last_synced_at` 是删除前那条本地行记录的同步基线（远端 `updated_at` 的秒值，
+    /// 与 planner 的 `last_synced_at` 同口径）。远端记录在那之后又变过，就说明有别的
+    /// 设备刚改过它 —— 此时直接推墓碑会把对方的改动一起抹掉，改为挂起
+    /// `LocalDeletedRemoteModified` 交给用户决定；基线与远端都不新则照旧推墓碑。
+    /// 传 `None` 表示拿不到基线，此时一律按「删除胜出」处理。
+    LocalDeleted {
+        data_type: String,
+        cloud_id: String,
+        last_synced_at: Option<i64>,
+    },
     RemoteChanged,
 }
 
@@ -191,11 +205,12 @@ where
         let _lock = self.store.acquire_lock(&self.config.device_id).await?;
         let local_items = self.local.list_items().await?;
         let remote_records = self.store.list_records(None, None).await?;
-        self.apply_local_delete_events(&events, &remote_records)
-            .await?;
-        // 挂起状态必须在处理远端墓碑之前取出来：墓碑处理要跳过已挂起的记录，
+        // 挂起状态必须在处理删除之前取出来：墓碑处理要跳过已挂起的记录，
         // 否则会把冲突指向的那条本地行删掉，留下再也解不开的悬挂冲突。
         let mut paused = self.conflicts.paused_record_keys().await?;
+        let local_delete_conflicts = self
+            .apply_local_delete_events(&events, &remote_records)
+            .await?;
         let tombstone_paused = self
             .apply_remote_tombstones(&local_items, &remote_records, &paused)
             .await?;
@@ -203,7 +218,10 @@ where
         // 与刚记下的冲突自相矛盾（远端删了、本地又推回去）。
         paused.extend(tombstone_paused.iter().cloned());
         let tombstone_conflicts = tombstone_paused.len();
-        let deleted = local_deleted_cloud_ids(&events);
+        let deleted = local_deleted_keys(&events)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<HashSet<_>>();
         let active_remote_records = remote_records
             .into_iter()
             .filter(|record| {
@@ -221,20 +239,23 @@ where
         self.apply_plan(&plan, &local_items, &active_remote_records)
             .await?;
         self.local.finalize_pass(&active_remote_records).await?;
-        if tombstone_conflicts > 0 {
+        let deletion_conflicts = local_delete_conflicts + tombstone_conflicts;
+        if deletion_conflicts > 0 {
             return Err(SyncStoreError::Conflict(format!(
-                "{tombstone_conflicts} remote deletion conflict(s) paused"
+                "{deletion_conflicts} deletion conflict(s) paused"
             )));
         }
         Ok(())
     }
 
+    /// 处理「本地条目被删除」事件；返回本轮因此新挂起冲突的条数。
     async fn apply_local_delete_events(
         &self,
         events: &HashSet<PersonalSyncEvent>,
         records: &[CloudSyncData],
-    ) -> Result<(), SyncStoreError> {
-        for key in local_deleted_cloud_ids(events) {
+    ) -> Result<usize, SyncStoreError> {
+        let mut conflicts = 0;
+        for (key, last_synced_at) in local_deleted_keys(events) {
             // 用户显式删掉了本地条目 ⇒ 这条记录上遗留的冲突已经没有任何意义，
             // 顺手清掉，免得对话框里留下一个点哪个按钮都报错的冲突。
             self.conflicts
@@ -243,13 +264,23 @@ where
             let Some(record) = find_remote_by_cloud_key(records, &key) else {
                 continue;
             };
-            if record.deleted_at.is_none() {
-                self.store
-                    .tombstone_record(&key.data_type, &key.cloud_id, Some(record.version))
-                    .await?;
+            if record.deleted_at.is_some() {
+                // 远端也已经是墓碑：两边都删了，没有需要同步的东西。
+                continue;
             }
+            if remote_changed_since_local_delete(last_synced_at, record) {
+                // 远端在本地删除之后又被改过 ⇒ 直接推墓碑会把对方的改动一起抹掉。
+                // 挂起冲突交给用户选：「使用远程版本」把记录重新拉回来，
+                // 「使用本地版本」保留本地的删除意图。
+                self.pause_deleted_local_conflict(record).await?;
+                conflicts += 1;
+                continue;
+            }
+            self.store
+                .tombstone_record(&key.data_type, &key.cloud_id, Some(record.version))
+                .await?;
         }
-        Ok(())
+        Ok(conflicts)
     }
 
     /// 处理远端墓碑；返回本轮因此新挂起冲突的记录键。
@@ -310,13 +341,32 @@ where
         conflict_type: PersonalConflictType,
     ) -> Result<(), SyncStoreError> {
         let conflict = PersonalSyncRecordConflict {
-            local_id: item.local_id.clone(),
+            local_id: Some(item.local_id.clone()),
             cloud_id: record.id.clone(),
             data_type: record.data_type.clone(),
             conflict_type,
         };
         self.conflicts
             .pause_record(&conflict, Some(item), Some(record))
+            .await
+    }
+
+    /// 挂起「本地已删除、远端被别的设备改过」的冲突。
+    ///
+    /// 本地行此时已经不在了，所以没有 `local_snapshot` 可存：冲突只带远端快照，
+    /// 解决时按 `(data_type, cloud_id)` 现场反查本地条目（见 `PersonalSyncConflictResolver`）。
+    async fn pause_deleted_local_conflict(
+        &self,
+        record: &CloudSyncData,
+    ) -> Result<(), SyncStoreError> {
+        let conflict = PersonalSyncRecordConflict {
+            local_id: None,
+            cloud_id: record.id.clone(),
+            data_type: record.data_type.clone(),
+            conflict_type: PersonalConflictType::LocalDeletedRemoteModified,
+        };
+        self.conflicts
+            .pause_record(&conflict, None, Some(record))
             .await
     }
 
@@ -397,7 +447,10 @@ where
         records: &[CloudSyncData],
     ) -> Result<(), SyncStoreError> {
         for conflict in &plan.conflicts {
-            let local = find_local_by_id(items, &conflict.local_id);
+            let local = conflict
+                .local_id
+                .as_deref()
+                .and_then(|local_id| find_local_by_id(items, local_id));
             let remote = find_remote_by_cloud_key(
                 records,
                 &PersonalSyncCloudKey {
@@ -450,6 +503,14 @@ fn local_changed_since_sync(item: &PersonalSyncItemSnapshot) -> bool {
     item.updated_at > item.last_synced_at.unwrap_or(0)
 }
 
+/// 远端记录是否在本地删除之后又被改过。
+///
+/// 基线（`last_synced_at`）与 planner 判定 `remote_changed` 的口径一致，都是秒。
+/// 基线未知时不下结论，维持「删除胜出」的既有行为，避免给用户弹一个无从判断的冲突。
+fn remote_changed_since_local_delete(baseline: Option<i64>, record: &CloudSyncData) -> bool {
+    baseline.is_some_and(|baseline| record.updated_at / 1000 > baseline)
+}
+
 fn find_remote_by_cloud_key<'a>(
     records: &'a [CloudSyncData],
     key: &PersonalSyncCloudKey,
@@ -459,17 +520,24 @@ fn find_remote_by_cloud_key<'a>(
         .find(|record| record.data_type == key.data_type && record.id == key.cloud_id)
 }
 
-fn local_deleted_cloud_ids(events: &HashSet<PersonalSyncEvent>) -> HashSet<PersonalSyncCloudKey> {
+/// 本轮里「本地条目被删除」的事件，连同删除前记录的同步基线。
+fn local_deleted_keys(
+    events: &HashSet<PersonalSyncEvent>,
+) -> Vec<(PersonalSyncCloudKey, Option<i64>)> {
     events
         .iter()
         .filter_map(|event| match event {
             PersonalSyncEvent::LocalDeleted {
                 data_type,
                 cloud_id,
-            } => Some(PersonalSyncCloudKey {
-                data_type: data_type.clone(),
-                cloud_id: cloud_id.clone(),
-            }),
+                last_synced_at,
+            } => Some((
+                PersonalSyncCloudKey {
+                    data_type: data_type.clone(),
+                    cloud_id: cloud_id.clone(),
+                },
+                *last_synced_at,
+            )),
             _ => None,
         })
         .collect()

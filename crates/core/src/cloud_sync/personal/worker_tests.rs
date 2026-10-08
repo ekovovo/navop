@@ -85,6 +85,7 @@ async fn worker_tombstones_record_for_local_delete_event() {
     worker.enqueue(PersonalSyncEvent::LocalDeleted {
         data_type: data_type::CONNECTION.to_string(),
         cloud_id: "cloud-1".to_string(),
+        last_synced_at: None,
     });
     worker.drain_once().await.expect("drain succeeds");
 
@@ -108,6 +109,7 @@ async fn worker_local_delete_isolates_same_cloud_id_by_data_type() {
     worker.enqueue(PersonalSyncEvent::LocalDeleted {
         data_type: data_type::CONNECTION.to_string(),
         cloud_id: "shared-cloud-id".to_string(),
+        last_synced_at: None,
     });
     worker.drain_once().await.expect("drain succeeds");
 
@@ -294,6 +296,7 @@ async fn worker_forgets_conflict_when_local_item_is_deleted() {
     worker.enqueue(PersonalSyncEvent::LocalDeleted {
         data_type: data_type::CONNECTION.to_string(),
         cloud_id: "cloud-1".to_string(),
+        last_synced_at: None,
     });
     worker.drain_once().await.expect("drain succeeds");
 
@@ -305,6 +308,127 @@ async fn worker_forgets_conflict_when_local_item_is_deleted() {
         vec![(data_type::CONNECTION.to_string(), "cloud-1".to_string())],
         store.tombstoned_keys()
     );
+}
+
+/// 本地删除时，如果远端在删除之前那条基线之后又被别的设备改过，就不能直接推墓碑
+/// —— 那会把对方刚做的改动一起抹掉。改为挂起 `LocalDeletedRemoteModified`（这个
+/// 枚举以前从来没被产生过，UI 文案和默认策略早就写好了）。
+#[tokio::test]
+async fn worker_pauses_local_delete_conflict_when_remote_changed_since_baseline() {
+    // 远端在 400 秒被改过；本地行删除前记录的基线是 100 秒。
+    let store = FakePersonalSyncStore::with_records(vec![remote_updated_at("cloud-1", 400_000)]);
+    let conflicts = FakeConflictSink::default();
+    let worker = PersonalSyncWorker::with_conflict_sink(
+        store.clone(),
+        FakePersonalSyncLocalSource::default(),
+        conflicts.clone(),
+        WorkerConfig::test(),
+    );
+
+    worker.enqueue(PersonalSyncEvent::LocalDeleted {
+        data_type: data_type::CONNECTION.to_string(),
+        cloud_id: "cloud-1".to_string(),
+        last_synced_at: Some(100),
+    });
+    let error = worker
+        .drain_once()
+        .await
+        .expect_err("远端改过的删除不能静默推墓碑");
+
+    assert!(matches!(error, SyncStoreError::Conflict(_)));
+    assert!(store.tombstoned_keys().is_empty());
+    let paused = conflicts.paused_conflicts();
+    assert_eq!(1, paused.len());
+    assert_eq!("cloud-1", paused[0].cloud_id);
+    assert_eq!(data_type::CONNECTION, paused[0].data_type);
+    assert_eq!(
+        PersonalConflictType::LocalDeletedRemoteModified,
+        paused[0].conflict_type
+    );
+    // 本地行已经不存在了：不能拿空串冒充本地 id，也不该存本地快照。
+    assert_eq!(None, paused[0].local_id);
+    assert_eq!(
+        vec![(None, Some("cloud-1".to_string()))],
+        conflicts.paused_snapshots()
+    );
+}
+
+/// 远端自基线之后没动过 ⇒ 删除是安全的，照旧推墓碑，不能平白给用户弹冲突。
+#[tokio::test]
+async fn worker_tombstones_local_delete_when_remote_unchanged_since_baseline() {
+    // 远端 300 秒的改动早于本地基线（400 秒）⇒ 我们删的是自己见过的那一版。
+    let store = FakePersonalSyncStore::with_records(vec![remote_updated_at("cloud-1", 300_000)]);
+    let conflicts = FakeConflictSink::default();
+    let worker = PersonalSyncWorker::with_conflict_sink(
+        store.clone(),
+        FakePersonalSyncLocalSource::default(),
+        conflicts.clone(),
+        WorkerConfig::test(),
+    );
+
+    worker.enqueue(PersonalSyncEvent::LocalDeleted {
+        data_type: data_type::CONNECTION.to_string(),
+        cloud_id: "cloud-1".to_string(),
+        last_synced_at: Some(400),
+    });
+    worker.drain_once().await.expect("drain succeeds");
+
+    assert_eq!(
+        vec![(data_type::CONNECTION.to_string(), "cloud-1".to_string())],
+        store.tombstoned_keys()
+    );
+    assert!(conflicts.paused_conflicts().is_empty());
+}
+
+/// 基线是秒级的 `last_synced_at`：远端与基线同秒时不算「被改过」。
+#[tokio::test]
+async fn worker_tombstones_local_delete_when_remote_matches_baseline_second() {
+    let store = FakePersonalSyncStore::with_records(vec![remote_updated_at("cloud-1", 400_000)]);
+    let worker = PersonalSyncWorker::new(
+        store.clone(),
+        FakePersonalSyncLocalSource::default(),
+        WorkerConfig::test(),
+    );
+
+    worker.enqueue(PersonalSyncEvent::LocalDeleted {
+        data_type: data_type::CONNECTION.to_string(),
+        cloud_id: "cloud-1".to_string(),
+        last_synced_at: Some(400),
+    });
+    worker.drain_once().await.expect("drain succeeds");
+
+    assert_eq!(1, store.tombstoned_keys().len());
+}
+
+/// 两边都已经是墓碑时什么都不用做（既不再推墓碑，也不挂冲突）。
+#[tokio::test]
+async fn worker_ignores_local_delete_when_remote_is_already_a_tombstone() {
+    let mut tombstone = test_record("cloud-1", data_type::CONNECTION, 4, "remote");
+    tombstone.deleted_at = Some(400_000);
+    let store = FakePersonalSyncStore::with_records(vec![tombstone]);
+    let conflicts = FakeConflictSink::default();
+    let worker = PersonalSyncWorker::with_conflict_sink(
+        store.clone(),
+        FakePersonalSyncLocalSource::default(),
+        conflicts.clone(),
+        WorkerConfig::test(),
+    );
+
+    worker.enqueue(PersonalSyncEvent::LocalDeleted {
+        data_type: data_type::CONNECTION.to_string(),
+        cloud_id: "cloud-1".to_string(),
+        last_synced_at: Some(100),
+    });
+    worker.drain_once().await.expect("drain succeeds");
+
+    assert!(store.tombstoned_keys().is_empty());
+    assert!(conflicts.paused_conflicts().is_empty());
+}
+
+fn remote_updated_at(cloud_id: &str, updated_at: i64) -> CloudSyncData {
+    let mut record = test_record(cloud_id, data_type::CONNECTION, 4, "remote");
+    record.updated_at = updated_at;
+    record
 }
 
 #[derive(Clone, Default)]
@@ -499,6 +623,9 @@ struct FakeConflictSink {
     paused: Arc<Mutex<Vec<PersonalSyncRecordConflict>>>,
     paused_keys: Arc<Mutex<HashSet<PersonalSyncCloudKey>>>,
     forgotten: Arc<Mutex<Vec<(String, String)>>>,
+    /// 每次 `pause_record` 传进来的 `(本地条目 id, 远端记录 id)`，用来确认
+    /// 「本地行已经不存在的冲突」真的没有本地快照。
+    paused_snapshots: Arc<Mutex<Vec<(Option<String>, Option<String>)>>>,
 }
 
 impl FakeConflictSink {
@@ -513,6 +640,13 @@ impl FakeConflictSink {
 
     fn paused_conflicts(&self) -> Vec<PersonalSyncRecordConflict> {
         self.paused.lock().expect("paused lock").clone()
+    }
+
+    fn paused_snapshots(&self) -> Vec<(Option<String>, Option<String>)> {
+        self.paused_snapshots
+            .lock()
+            .expect("paused_snapshots lock")
+            .clone()
     }
 
     fn pause_key(&self, data_type: &str, cloud_id: &str) {
@@ -539,13 +673,20 @@ impl PersonalSyncConflictSink for FakeConflictSink {
     async fn pause_record(
         &self,
         conflict: &PersonalSyncRecordConflict,
-        _local: Option<&PersonalSyncItemSnapshot>,
-        _remote: Option<&CloudSyncData>,
+        local: Option<&PersonalSyncItemSnapshot>,
+        remote: Option<&CloudSyncData>,
     ) -> Result<(), SyncStoreError> {
         self.paused
             .lock()
             .expect("paused lock")
             .push(conflict.clone());
+        self.paused_snapshots
+            .lock()
+            .expect("paused_snapshots lock")
+            .push((
+                local.map(|item| item.local_id.clone()),
+                remote.map(|record| record.id.clone()),
+            ));
         Ok(())
     }
 

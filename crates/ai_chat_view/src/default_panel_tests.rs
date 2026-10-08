@@ -131,6 +131,7 @@ fn resource_catalog_refreshes_only_for_connection_list_changes() {
         &ConnectionDataEvent::ConnectionDeleted {
             connection_id: 1,
             cloud_id: None,
+            last_synced_at: None,
         },
     ));
     assert!(!should_refresh_resource_catalog(
