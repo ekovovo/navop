@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSPasteboardWriting};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_app_kit::{
+    NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString, NSPasteboardWriting,
+};
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
 /// Writes validated staging paths from a GPUI foreground callback.
@@ -13,6 +15,7 @@ pub(super) fn write_files_to_system_clipboard(paths: &[PathBuf]) -> anyhow::Resu
     write_files_to_pasteboard(&pasteboard, paths)
 }
 
+#[allow(deprecated)]
 fn write_files_to_pasteboard(pasteboard: &NSPasteboard, paths: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::ensure!(!paths.is_empty(), "clipboard file list is empty");
 
@@ -49,13 +52,31 @@ fn write_files_to_pasteboard(pasteboard: &NSPasteboard, paths: &[PathBuf]) -> an
             tracing::debug!("macOS rejected the clipboard path text fallback");
         }
 
+        // 旧式 NSFilenamesPboardType:路径字符串数组。这是 Finder 粘贴与
+        // GPUI pasteboard 读回(只认它来还原 ExternalPaths)共同的规范读法;
+        // 只写现代 FileURL 时两者都只能退化到文本表示。放在 writeObjects
+        // 之后写,避免被 writeObjects 的内容重置清掉。
+        let filenames_type = unsafe { NSFilenamesPboardType };
+        let ns_paths: Vec<Retained<NSString>> = path_strings
+            .iter()
+            .map(|path| NSString::from_str(path))
+            .collect();
+        let paths_array = NSArray::from_retained_slice(&ns_paths);
+        let paths_plist = unsafe { paths_array.cast_unchecked::<AnyObject>() };
+        if !unsafe { pasteboard.setPropertyList_forType(&paths_plist, filenames_type) } {
+            tracing::debug!("macOS rejected the clipboard filenames property list");
+        }
+
         Ok(())
     })
 }
 
+#[allow(deprecated)]
 #[cfg(test)]
 mod tests {
+    use objc2::msg_send;
     use objc2::ClassType as _;
+    use objc2::ffi::NSUInteger;
 
     use super::*;
 
@@ -99,5 +120,21 @@ mod tests {
             format!("{}\n{}", first.to_string_lossy(), second.to_string_lossy()),
             fallback.to_string()
         );
+
+        // GPUI 的读回与 Finder 粘贴都依赖旧式 Filenames 类型:必须能按
+        // 原顺序还原全部路径。
+        let filenames_type = unsafe { NSFilenamesPboardType };
+        let filenames = pasteboard
+            .propertyListForType(filenames_type)
+            .expect("filenames property list on pasteboard");
+        let count: usize = unsafe { msg_send![&filenames, count] };
+        assert_eq!(count, 2);
+        for (index, expected) in [&first, &second].into_iter().enumerate() {
+            let item: *mut NSString =
+                unsafe { msg_send![&filenames, objectAtIndex: index as NSUInteger] };
+            assert!(!item.is_null());
+            let item = unsafe { &*item };
+            assert_eq!(item.to_string(), expected.to_string_lossy());
+        }
     }
 }

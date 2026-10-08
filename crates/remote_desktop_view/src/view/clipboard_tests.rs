@@ -9,7 +9,7 @@ use super::{
     REMOTE_TEXT_AFTER_FILES_SUPPRESS, allocate_local_clipboard_transfer_id,
     classify_local_clipboard, clipboard_files_supported, clipboard_sync_is_due,
     clipboard_text_supported, is_remote_clipboard_transfer_id, remote_text_suppressed_after_files,
-    validate_remote_clipboard_paths_in_root,
+    remote_text_suppressed_while_files_installed, validate_remote_clipboard_paths_in_root,
 };
 
 #[test]
@@ -228,4 +228,16 @@ fn remote_text_is_suppressed_only_inside_the_post_file_install_window() {
         Some(installed_at),
         installed_at + REMOTE_TEXT_AFTER_FILES_SUPPRESS
     ));
+}
+
+#[test]
+fn remote_text_is_suppressed_as_long_as_installed_files_hold_the_clipboard() {
+    // Installed files still authoritative (no local copy since) -> ignored,
+    // no matter how late rdpclip re-announces the file's text format.
+    assert!(remote_text_suppressed_while_files_installed(Some(&vec![
+        "/tmp/navop-rdp-clipboard/transfer-x/a.txt".to_string()
+    ])));
+
+    // A local copy superseded the installed files -> text passes through.
+    assert!(!remote_text_suppressed_while_files_installed(None));
 }
