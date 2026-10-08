@@ -231,6 +231,14 @@ impl HomePage {
                     _ = this.update(cx, |this, cx| {
                         this.workspaces.retain(|w| w.id != Some(workspace_id));
                         this.filtered_workspace_ids.remove(&workspace_id);
+                        if let Some(cloud_id) = &cloud_id {
+                            // 本地分组没了，遗留的冲突也就解不开了，删除时一并丢掉。
+                            crate::personal_sync_runtime::forget_personal_conflict(
+                                &storage,
+                                one_core::cloud_sync::data_type::WORKSPACE,
+                                cloud_id,
+                            );
+                        }
                         emit_connection_event(
                             ConnectionDataEvent::WorkspaceDeleted {
                                 workspace_id,

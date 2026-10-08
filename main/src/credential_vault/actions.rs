@@ -126,6 +126,14 @@ fn delete_credential(
         });
     match result {
         Ok((DeleteCredentialOutcome::Deleted, cloud_id)) => {
+            if let Some(cloud_id) = &cloud_id {
+                // 本地凭据没了，遗留的冲突也就解不开了，删除时一并丢掉。
+                crate::personal_sync_runtime::forget_personal_conflict(
+                    storage,
+                    one_core::cloud_sync::data_type::CREDENTIAL,
+                    cloud_id,
+                );
+            }
             emit_connection_event_from_app(
                 ConnectionDataEvent::CredentialDeleted {
                     credential_id: id,

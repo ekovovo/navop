@@ -401,6 +401,15 @@ impl HomePage {
                         if this.selected_connection_id == Some(conn_id) {
                             this.selected_connection_id = None;
                         }
+                        if let Some(cloud_id) = &cloud_id {
+                            // 本地条目没了，遗留的冲突也就解不开了（点「使用远程版本」
+                            // 还会把它重新拉回来），删除时一并丢掉。
+                            crate::personal_sync_runtime::forget_personal_conflict(
+                                &storage,
+                                one_core::cloud_sync::data_type::CONNECTION,
+                                cloud_id,
+                            );
+                        }
                         emit_connection_event(
                             ConnectionDataEvent::ConnectionDeleted {
                                 connection_id: conn_id,
