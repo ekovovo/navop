@@ -2,8 +2,18 @@ use std::path::PathBuf;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
+// `NSFilenamesPboardType` 是 AppKit 的旧式（deprecated）类型，但 Finder 与
+// GPUI 的 pasteboard 读回（`gpui_macos/pasteboard.rs`）都只认它来还原
+// `ExternalPaths`，见下面 `write_files_to_pasteboard` 的说明。函数上的
+// `#[allow(deprecated)]` 覆盖不到导入语句本身，所以这里必须单独放行，
+// 否则 CI 的 `-D warnings` 会在这一行直接报错。
+#[allow(deprecated)]
 use objc2_app_kit::{NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString};
-use objc2_foundation::{NSArray, NSData, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSString};
+// `NSURL` 只在下面的用例里用来按规范读法取回文件 URL 对象；直接放在顶层会让
+// 非测试构建出现 unused import（同样会被 `-D warnings` 拦下）。
+#[cfg(test)]
+use objc2_foundation::NSURL;
 
 /// Writes validated staging paths from a GPUI foreground callback.
 ///
