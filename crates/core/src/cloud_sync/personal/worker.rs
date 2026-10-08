@@ -79,6 +79,14 @@ pub trait PersonalSyncConflictSink: Send + Sync {
         local: Option<&PersonalSyncItemSnapshot>,
         remote: Option<&CloudSyncData>,
     ) -> Result<(), SyncStoreError>;
+
+    /// 本地条目被删除后调用：这条记录上遗留的冲突已经失去意义，直接丢掉。
+    ///
+    /// 冲突解决要按云端记录反查本地条目（`local.list_items()`），本地条目消失后
+    /// 冲突就再也解不开了，所以不能让它留在表里。
+    async fn forget_record(&self, _data_type: &str, _cloud_id: &str) -> Result<(), SyncStoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,9 +193,16 @@ where
         let remote_records = self.store.list_records(None, None).await?;
         self.apply_local_delete_events(&events, &remote_records)
             .await?;
-        let tombstone_conflicts = self
-            .apply_remote_tombstones(&local_items, &remote_records)
+        // 挂起状态必须在处理远端墓碑之前取出来：墓碑处理要跳过已挂起的记录，
+        // 否则会把冲突指向的那条本地行删掉，留下再也解不开的悬挂冲突。
+        let mut paused = self.conflicts.paused_record_keys().await?;
+        let tombstone_paused = self
+            .apply_remote_tombstones(&local_items, &remote_records, &paused)
             .await?;
+        // 本轮刚挂起的记录也要排除出 planner：否则同一次 pass 会把它重新上传，
+        // 与刚记下的冲突自相矛盾（远端删了、本地又推回去）。
+        paused.extend(tombstone_paused.iter().cloned());
+        let tombstone_conflicts = tombstone_paused.len();
         let deleted = local_deleted_cloud_ids(&events);
         let active_remote_records = remote_records
             .into_iter()
@@ -199,7 +214,6 @@ where
                     })
             })
             .collect::<Vec<_>>();
-        let paused = self.conflicts.paused_record_keys().await?;
         let plan = self
             .planner
             .plan(&local_items, &active_remote_records, &paused);
@@ -221,6 +235,11 @@ where
         records: &[CloudSyncData],
     ) -> Result<(), SyncStoreError> {
         for key in local_deleted_cloud_ids(events) {
+            // 用户显式删掉了本地条目 ⇒ 这条记录上遗留的冲突已经没有任何意义，
+            // 顺手清掉，免得对话框里留下一个点哪个按钮都报错的冲突。
+            self.conflicts
+                .forget_record(&key.data_type, &key.cloud_id)
+                .await?;
             let Some(record) = find_remote_by_cloud_key(records, &key) else {
                 continue;
             };
@@ -233,37 +252,72 @@ where
         Ok(())
     }
 
+    /// 处理远端墓碑；返回本轮因此新挂起冲突的记录键。
     async fn apply_remote_tombstones(
         &self,
         items: &[PersonalSyncItemSnapshot],
         records: &[CloudSyncData],
-    ) -> Result<usize, SyncStoreError> {
-        let mut conflicts = 0;
+        paused: &HashSet<PersonalSyncCloudKey>,
+    ) -> Result<HashSet<PersonalSyncCloudKey>, SyncStoreError> {
+        let mut conflicts = HashSet::new();
         for record in records.iter().filter(|record| record.deleted_at.is_some()) {
             let key = PersonalSyncCloudKey {
                 data_type: record.data_type.clone(),
                 cloud_id: record.id.clone(),
             };
-            if let Some(item) = find_local_by_cloud_key(items, &key) {
-                match self.local.delete_item(item).await {
-                    Ok(()) => {}
-                    Err(SyncStoreError::Conflict(_)) => {
-                        let conflict = PersonalSyncRecordConflict {
-                            local_id: item.local_id.clone(),
-                            cloud_id: record.id.clone(),
-                            data_type: record.data_type.clone(),
-                            conflict_type: PersonalConflictType::LocalModifiedRemoteDeleted,
-                        };
-                        self.conflicts
-                            .pause_record(&conflict, Some(item), Some(record))
-                            .await?;
-                        conflicts += 1;
-                    }
-                    Err(error) => return Err(error),
+            // 已经挂起冲突的记录保持原样：再删本地行会让冲突里存档的
+            // `local_snapshot` 指向一个不存在的本地条目，冲突就永远解不开了。
+            if paused.contains(&key) {
+                continue;
+            }
+            let Some(item) = find_local_by_cloud_key(items, &key) else {
+                continue;
+            };
+            if local_changed_since_sync(item) {
+                // 本地自上次同步之后改过 ⇒ 不能跟着远端墓碑静默丢掉用户的改动，
+                // 记一条 `LocalModifiedRemoteDeleted` 交给用户决定。
+                self.pause_tombstone_conflict(
+                    item,
+                    record,
+                    PersonalConflictType::LocalModifiedRemoteDeleted,
+                )
+                .await?;
+                conflicts.insert(key);
+                continue;
+            }
+            match self.local.delete_item(item).await {
+                Ok(()) => {}
+                Err(SyncStoreError::Conflict(_)) => {
+                    // 本地拒绝删除（例如凭据仍被连接引用）⇒ 同样交给用户决定。
+                    self.pause_tombstone_conflict(
+                        item,
+                        record,
+                        PersonalConflictType::LocalModifiedRemoteDeleted,
+                    )
+                    .await?;
+                    conflicts.insert(key);
                 }
+                Err(error) => return Err(error),
             }
         }
         Ok(conflicts)
+    }
+
+    async fn pause_tombstone_conflict(
+        &self,
+        item: &PersonalSyncItemSnapshot,
+        record: &CloudSyncData,
+        conflict_type: PersonalConflictType,
+    ) -> Result<(), SyncStoreError> {
+        let conflict = PersonalSyncRecordConflict {
+            local_id: item.local_id.clone(),
+            cloud_id: record.id.clone(),
+            data_type: record.data_type.clone(),
+            conflict_type,
+        };
+        self.conflicts
+            .pause_record(&conflict, Some(item), Some(record))
+            .await
     }
 
     async fn apply_plan(
@@ -387,6 +441,13 @@ fn find_local_by_id<'a>(
     local_id: &str,
 ) -> Option<&'a PersonalSyncItemSnapshot> {
     items.iter().find(|item| item.local_id == local_id)
+}
+
+/// 本地条目自上次同步之后是否被改过。
+///
+/// 与 planner 判定 `local_changed` 的口径一致：`updated_at` 比 `last_synced_at` 新。
+fn local_changed_since_sync(item: &PersonalSyncItemSnapshot) -> bool {
+    item.updated_at > item.last_synced_at.unwrap_or(0)
 }
 
 fn find_remote_by_cloud_key<'a>(
