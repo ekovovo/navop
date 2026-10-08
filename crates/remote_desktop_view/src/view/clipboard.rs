@@ -249,6 +249,10 @@ impl RemoteDesktopView {
         self.last_clipboard_text = None;
         self.last_clipboard_files_installed_at = Some(Instant::now());
         self.last_clipboard_sync_at = Some(Instant::now());
+        tracing::info!(
+            files = count,
+            "installed remote clipboard files on the system clipboard"
+        );
         self.notify_clipboard_files_received(count, window, cx);
     }
 

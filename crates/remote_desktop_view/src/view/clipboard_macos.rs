@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2_app_kit::{
-    NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString, NSPasteboardWriting,
-};
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
 /// Writes validated staging paths from a GPUI foreground callback.
@@ -28,35 +26,21 @@ fn write_files_to_pasteboard(pasteboard: &NSPasteboard, paths: &[PathBuf]) -> an
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     autoreleasepool(|_| {
+        let filenames_type = unsafe { NSFilenamesPboardType };
         let string_type = unsafe { NSPasteboardTypeString };
 
-        // 现代多文件复制入口:writeObjects 由 NSURL 自己编码
-        // NSPasteboardTypeFileURL 等全部表示,Finder 与大多数宿主优先读取。
-        let file_urls = path_strings
-            .iter()
-            .zip(paths)
-            .map(|(path, original)| {
-                NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path), original.is_dir())
-            })
-            .collect::<Vec<_>>();
-        let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = file_urls
-            .into_iter()
-            .map(ProtocolObject::from_retained)
-            .collect();
-        pasteboard.writeObjects(&NSArray::from_retained_slice(&objects));
+        // Finder 复制文件的经典写入序列:declareTypes + setPropertyList。
+        // 不能用 writeObjects(NSURL):在本机(受限进程/部分 macOS 版本下)
+        // 它只产出文本表示,既没有 public.file-url,也让 GPUI 的 pasteboard
+        // 读回退化成 String —— 结果是 Finder 粘贴出「已粘贴 <日期>」的文本
+        // 文件、宿主每 500ms 把自己刚装的文件剪贴板当成本地新文本回推远端。
+        //
+        // NSFilenamesPboardType 是 Finder 与 GPUI(gpui_macos/pasteboard.rs
+        // 的 read 只认它来还原 ExternalPaths)共同的规范表示;AppKit 会由它
+        // 自动派生 public.file-url / Apple URL pasteboard type 等类型。
+        let types = NSArray::from_slice(&[filenames_type, string_type]);
+        unsafe { pasteboard.declareTypes_owner(&types, None) };
 
-        // 纯文本回退:以换行分隔的路径列表,供只认文本的接收方使用。
-        let joined_paths = path_strings.join("\n");
-        let text = NSData::with_bytes(joined_paths.as_bytes());
-        if !pasteboard.setData_forType(Some(&text), string_type) {
-            tracing::debug!("macOS rejected the clipboard path text fallback");
-        }
-
-        // 旧式 NSFilenamesPboardType:路径字符串数组。这是 Finder 粘贴与
-        // GPUI pasteboard 读回(只认它来还原 ExternalPaths)共同的规范读法;
-        // 只写现代 FileURL 时两者都只能退化到文本表示。放在 writeObjects
-        // 之后写,避免被 writeObjects 的内容重置清掉。
-        let filenames_type = unsafe { NSFilenamesPboardType };
         let ns_paths: Vec<Retained<NSString>> = path_strings
             .iter()
             .map(|path| NSString::from_str(path))
@@ -64,7 +48,14 @@ fn write_files_to_pasteboard(pasteboard: &NSPasteboard, paths: &[PathBuf]) -> an
         let paths_array = NSArray::from_retained_slice(&ns_paths);
         let paths_plist = unsafe { paths_array.cast_unchecked::<AnyObject>() };
         if !unsafe { pasteboard.setPropertyList_forType(&paths_plist, filenames_type) } {
-            tracing::debug!("macOS rejected the clipboard filenames property list");
+            tracing::warn!("macOS rejected the clipboard filenames property list");
+        }
+
+        // 纯文本回退:以换行分隔的路径列表,供只认文本的接收方使用。
+        let joined_paths = path_strings.join("\n");
+        let text = NSData::with_bytes(joined_paths.as_bytes());
+        if !pasteboard.setData_forType(Some(&text), string_type) {
+            tracing::warn!("macOS rejected the clipboard path text fallback");
         }
 
         Ok(())
@@ -100,8 +91,8 @@ mod tests {
         write_files_to_pasteboard(&pasteboard, &[first.clone(), second.clone()])
             .expect("write native file clipboard");
 
-        // writeObjects 为每个 URL 建独立 pasteboard item,规范读法是
-        // readObjectsForClasses: 直接取回 NSURL 对象。
+        // declareTypes 走 Filenames 表示,AppKit 由它派生 public.file-url;
+        // 规范读法是 readObjectsForClasses: 直接取回 NSURL 对象。
         let classes = NSArray::from_slice(&[NSURL::class()]);
         let urls = unsafe { pasteboard.readObjectsForClasses_options(&classes, None) }
             .expect("file URL objects readable from pasteboard");
