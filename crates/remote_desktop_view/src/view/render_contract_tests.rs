@@ -890,7 +890,10 @@ fn windows_native_reconnect_resets_and_reopens_the_native_presentation() {
         "pub(crate) fn refresh_native_readiness",
     );
     assert!(adapter_reconnect.contains("self.presentation.begin_reconnect(&mut sink)?"));
-    assert!(adapter_reconnect.contains("focus_parent: Some(focus_parent)"));
+    // `focus_parent` has to reach the presentation through the sink that was
+    // built with it, not through the plain sink.
+    assert!(adapter_reconnect.contains("Self::sink_with_focus_parent("));
+    assert!(adapter_reconnect.contains("focus_parent,"));
 
     let effects = function_body(
         &view,
@@ -1974,8 +1977,7 @@ fn windows_native_presentation_readiness_is_independent_of_canvas_frames() {
 fn windows_native_timeout_hands_off_to_the_owner_thread_retirement_queue() {
     let view = include_str!("../view.rs").replace("\r\n", "\n");
     let retirement = include_str!("windows_native_retirement.rs").replace("\r\n", "\n");
-    let drain =
-        include_str!("../windows_native_shutdown/platform/drain.rs").replace("\r\n", "\n");
+    let drain = include_str!("../windows_native_shutdown/platform/drain.rs").replace("\r\n", "\n");
 
     // Every deadline path retires; none of them leaks.
     for (name, source) in [("view.rs", &view), ("drain.rs", &drain)] {

@@ -233,8 +233,8 @@ pub(crate) fn end_popup_session(window: &mut Window, cx: &mut App) {
 /// **两类弹窗都要装**：一次性弹窗（没登记复用键）同样不能让 AppKit 自己销毁窗口，
 /// 否则「保存连接」这种最常见的一步还是闪退。它们没有复用键，关闭后只是停放在那里。
 ///
-/// 未启用 [`crate::window_close::HIDE_WINDOWS_ON_CLOSE`] 的构建（ARM macOS / Windows /
-/// Linux）什么都不装：关闭交回 AppKit 与 GPUI 自己的销毁路径，与加这套机制之前一致。
+/// 未启用 [`crate::window_close::HIDE_WINDOWS_ON_CLOSE`] 的构建（该开关当前恒为 `false`）
+/// 什么都不装：关闭交回 AppKit 与 GPUI 自己的销毁路径（`remove_window()`）。
 fn install_popup_close_routes(window: &mut Window, cx: &mut App) {
     if !crate::window_close::HIDE_WINDOWS_ON_CLOSE {
         return;
@@ -1060,9 +1060,9 @@ mod reuse_contract_tests {
 
     /// **开关只有一个来源**，而且它把整条链路上的每一环都门控了。
     ///
-    /// 这套机制只在打包时开了 `macos-touchbar-window-hide` 的 macOS 包里启用（见
-    /// `crates/core/Cargo.toml` 的 `macos-touchbar-window-hide`；当前发布流水线只给
-    /// `x86_64-apple-darwin` 打开），其他构建必须逐字退回原行为。漏掉任何一环都会变成
+    /// 这套机制只在打包时传了 `macos-touchbar-window-hide` 的 macOS 包里启用（见
+    /// `crates/core/Cargo.toml` 的 `macos-touchbar-window-hide`；该开关当前恒为 `false`，
+    /// 上游 zed#65186 已修掉根因），其他构建必须逐字退回原行为。漏掉任何一环都会变成
     /// 半开半关的状态，而且都不报错、只静默退化：
     /// 登记了却不隐藏（窗口照样销毁，条目永远探活失败，白占内存）、隐藏了却不登记
     /// （窗口藏起来但业务 view 不卸载，纯泄漏）、装了关闭路线却不隐藏（点红点没反应）。
