@@ -7,13 +7,16 @@
 //! 而同一页面里由视图直接渲染的搜索框 / chips 正常。
 
 use gpui::{AnyElement, Context};
-use gpui_component::{Disableable, Sizable, button::{Button, ButtonRounded, ButtonVariants}};
+use gpui_component::{
+    Disableable, Sizable,
+    button::{Button, ButtonRounded, ButtonVariants},
+};
 use one_assets::IconName;
 use rust_i18n::t;
 
 use crate::{
-    ExtensionManagerView, ExtensionSummary, MarketplaceEntry,
-    MarketplaceInstallState, marketplace_install_state, state::MarketplaceLoadState,
+    ExtensionManagerView, ExtensionSummary, MarketplaceEntry, MarketplaceInstallState,
+    marketplace_install_state, state::MarketplaceLoadState,
 };
 
 /// 已安装扩展卡片的数据快照。

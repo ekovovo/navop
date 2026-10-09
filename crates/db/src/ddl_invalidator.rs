@@ -1311,9 +1311,7 @@ mod tests {
             Some("public"),
         );
         match event {
-            Some(DdlEvent::AlterTable {
-                schema, table, ..
-            }) => {
+            Some(DdlEvent::AlterTable { schema, table, .. }) => {
                 assert_eq!(table, "users");
                 assert_eq!(schema.as_deref(), Some("public"));
             }
@@ -1327,11 +1325,8 @@ mod tests {
         assert!(DdlInvalidator::starts_with_ddl_keyword(
             "COMMENT ON TABLE users IS 'x'"
         ));
-        let events = DdlInvalidator::parse_ddl_events(
-            "COMMENT ON COLUMN users.name IS 'x'",
-            "mydb",
-            None,
-        );
+        let events =
+            DdlInvalidator::parse_ddl_events("COMMENT ON COLUMN users.name IS 'x'", "mydb", None);
         assert_eq!(events.len(), 1, "events: {events:?}");
     }
 

@@ -234,7 +234,7 @@ fn report_delete_entry_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_remote, SftpUploadConnection};
+    use super::{SftpUploadConnection, connect_remote};
     use ftp::FtpConnectConfig;
 
     #[tokio::test]

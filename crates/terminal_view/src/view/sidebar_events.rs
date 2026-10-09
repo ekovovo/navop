@@ -306,6 +306,9 @@ impl TerminalView {
             TerminalSidebarEvent::SuggestionPopupChanged(enabled) => {
                 self.apply_suggestion_popup_enabled(*enabled, cx);
             }
+            TerminalSidebarEvent::SuggestionPopupOpacityChanged(opacity) => {
+                self.set_suggestion_popup_opacity(*opacity, cx);
+            }
             TerminalSidebarEvent::MiddleClickPasteChanged(enabled) => {
                 self.set_middle_click_paste(*enabled, cx);
             }
@@ -346,12 +349,7 @@ impl TerminalView {
             TerminalSidebarEvent::SyncWorkingDir => {
                 // 手动同步同样要带上上报主机名：跨主机时面板需要拒收路径，
                 // 而不是把别台机器的目录套到当前远程会话上。
-                if let Some(reported) = self
-                    .terminal
-                    .read(cx)
-                    .reported_working_dir()
-                    .cloned()
-                {
+                if let Some(reported) = self.terminal.read(cx).reported_working_dir().cloned() {
                     self.sidebar.update(cx, |sidebar, cx| {
                         sidebar.sync_file_manager_path(reported, cx);
                     });

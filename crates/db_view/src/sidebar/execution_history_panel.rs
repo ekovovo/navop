@@ -5,7 +5,7 @@ use rust_i18n::t;
 use std::sync::Arc;
 
 use super::execution_history::{
-    ExecutionContext, ExecutionHistory, ExecutionRecord, MAX_EXECUTION_RECORDS,
+    ExecutionContext, ExecutionHistory, ExecutionRecord, ExecutionStatus, MAX_EXECUTION_RECORDS,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,6 +14,17 @@ pub(super) enum ExecutionHistoryFilter {
     All,
     Success,
     Error,
+}
+
+impl ExecutionHistoryFilter {
+    /// 记录是否属于当前筛选。
+    pub(super) fn matches(self, record: &ExecutionRecord) -> bool {
+        match self {
+            Self::All => true,
+            Self::Success => record.status == ExecutionStatus::Success,
+            Self::Error => record.status == ExecutionStatus::Error,
+        }
+    }
 }
 
 pub struct ExecutionHistoryPanel {

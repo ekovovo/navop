@@ -1152,9 +1152,7 @@ fn transaction_liveness(probe: &anyhow::Result<Vec<db::SqlResult>>) -> Transacti
     // 复用 PR #272 的会话级 ping 超时：死连接的探测有界返回 Err。
     match probe {
         Err(_) => TransactionLiveness::Dead,
-        Ok(results) if results.iter().any(db::SqlResult::is_error) => {
-            TransactionLiveness::Dead
-        }
+        Ok(results) if results.iter().any(db::SqlResult::is_error) => TransactionLiveness::Dead,
         Ok(_) => TransactionLiveness::Alive,
     }
 }
@@ -3858,8 +3856,7 @@ impl SqlEditorTab {
                             t!("Query.transaction_terminated_by_disconnect").to_string(),
                         );
                         // 死会话不再可复用，丢弃；失败只记日志不阻断收尾。
-                        if let Err(error) =
-                            global_state.close_session(cx, session_id.clone()).await
+                        if let Err(error) = global_state.close_session(cx, session_id.clone()).await
                         {
                             error!(
                                 "Failed to close dead manual transaction session {}: {:?}",

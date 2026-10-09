@@ -1,8 +1,8 @@
 pub mod chat_history;
 pub mod connector;
 pub mod manager;
-pub mod notifier;
 pub mod navop_provider;
+pub mod notifier;
 pub mod storage;
 pub mod types;
 

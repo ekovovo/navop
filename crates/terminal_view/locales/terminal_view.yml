@@ -682,6 +682,18 @@ Settings:
     en: Suggestion popup
     zh-CN: 弹框候选词
     zh-HK: 彈框候選詞
+  suggestion_popup_opacity:
+    en: Popup background
+    zh-CN: 弹层背景不透明度
+    zh-HK: 彈層背景不透明度
+  suggestion_popup_opacity_value:
+    en: "%{percent}%"
+    zh-CN: "%{percent}%"
+    zh-HK: "%{percent}%"
+  suggestion_popup_opacity_help:
+    en: Higher values hide more of the terminal text behind the popup.
+    zh-CN: 数值越高，弹层越不透出下层终端文字。
+    zh-HK: 數值越高，彈層越不透出下層終端文字。
   title:
     en: Settings
     zh-CN: 设置
@@ -2312,6 +2324,10 @@ FileManager:
     en: Sync Terminal Directory
     zh-CN: 同步终端目录
     zh-HK: 同步終端目錄
+  locate_terminal_dir:
+    en: Locate Current Directory in Terminal
+    zh-CN: 定位到终端目录
+    zh-HK: 定位到終端目錄
   follow_terminal_dir_on:
     en: "Following terminal directory: on. Click to stop auto-following."
     zh-CN: "已跟随终端目录：开启。点击可停止自动跟随。"

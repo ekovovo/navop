@@ -1,9 +1,8 @@
 //! 表格内查找的单元测试与结构契约
 
 use super::{
-    FindMatch, NULL_TEXT, char_index_to_byte_index, char_range_to_byte_range,
-    normalize_find_query, resolve_find, row_highlight_ranges, row_matches, row_text,
-    scroll_target_for_match,
+    FindMatch, NULL_TEXT, char_index_to_byte_index, char_range_to_byte_range, normalize_find_query,
+    resolve_find, row_highlight_ranges, row_matches, row_text, scroll_target_for_match,
 };
 use crate::edit_table::TableKeybindings;
 
@@ -192,7 +191,9 @@ fn highlight_shares_the_cell_content_box_with_the_td_content() {
         .find("fn render_interactive_cell(")
         .expect("interactive cell renderer");
     let body = &state[start..];
-    let end = body.find("\n    fn render_find_highlight(").expect("next method");
+    let end = body
+        .find("\n    fn render_find_highlight(")
+        .expect("next method");
     let body = &body[..end];
 
     // 高亮与 td 内容必须挂在同一个「内容区」盒子里（相对 `relative` 容器绝对定位）：
@@ -268,7 +269,10 @@ fn highlight_shapes_text_with_the_style_active_at_paint_time() {
         !signature.contains("font_size: Pixels,"),
         "构造函数不应接收 font_size"
     );
-    assert!(!signature.contains("text_runs"), "构造函数不应接收 text_runs");
+    assert!(
+        !signature.contains("text_runs"),
+        "构造函数不应接收 text_runs"
+    );
 
     // render 侧也不得再从环境 text_style 取字体去构造 TextRun。
     assert!(

@@ -44,6 +44,8 @@ pub struct TerminalSettings {
     pub auto_copy: bool,
     pub enable_autocomplete: bool,
     pub show_suggestion_popup: bool,
+    /// 命令提示 / cd 补全 / 历史搜索下拉弹层的背景不透明度（0.5–1.0）
+    pub suggestion_popup_opacity: f32,
     pub middle_click_paste: bool,
     pub right_click_paste: bool,
     pub paste_image_upload: bool,
@@ -106,6 +108,9 @@ impl TerminalSettings {
             auto_copy: app_settings.terminal_auto_copy,
             enable_autocomplete: app_settings.terminal_enable_autocomplete,
             show_suggestion_popup: app_settings.terminal_show_suggestion_popup,
+            suggestion_popup_opacity: AppSettings::normalize_terminal_suggestion_popup_opacity(
+                app_settings.terminal_suggestion_popup_opacity,
+            ),
             middle_click_paste: app_settings.terminal_middle_click_paste,
             right_click_paste: app_settings.terminal_right_click_paste,
             paste_image_upload: app_settings.terminal_paste_image_upload,
@@ -315,6 +320,7 @@ fn update_app_settings<T>(
         settings.terminal_auto_copy = next.auto_copy;
         settings.terminal_enable_autocomplete = next.enable_autocomplete;
         settings.terminal_show_suggestion_popup = next.show_suggestion_popup;
+        settings.terminal_suggestion_popup_opacity = next.suggestion_popup_opacity;
         settings.terminal_middle_click_paste = next.middle_click_paste;
         settings.terminal_right_click_paste = next.right_click_paste;
         settings.terminal_paste_image_upload = next.paste_image_upload;
@@ -337,6 +343,7 @@ fn terminal_app_fields_equal(left: &TerminalSettings, right: &TerminalSettings) 
         && left.auto_copy == right.auto_copy
         && left.enable_autocomplete == right.enable_autocomplete
         && left.show_suggestion_popup == right.show_suggestion_popup
+        && left.suggestion_popup_opacity == right.suggestion_popup_opacity
         && left.middle_click_paste == right.middle_click_paste
         && left.right_click_paste == right.right_click_paste
         && left.paste_image_upload == right.paste_image_upload
@@ -476,6 +483,30 @@ mod tests {
             TerminalSettings::from_parts(&app_settings, &TerminalLocalSettings::default());
 
         assert!(settings.right_click_paste);
+    }
+
+    #[test]
+    fn terminal_settings_reads_suggestion_popup_opacity_from_app_settings() {
+        // issue #73：手改过 settings.json 的越界值必须在进入视图前就被夹回来，
+        // 否则弹层会全透明（读不了）或完全遮挡终端（回到 issue #5）。
+        let app_settings = AppSettings {
+            terminal_suggestion_popup_opacity: 5.0,
+            ..AppSettings::default()
+        };
+
+        let settings =
+            TerminalSettings::from_parts(&app_settings, &TerminalLocalSettings::default());
+
+        assert!((settings.suggestion_popup_opacity - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn terminal_suggestion_popup_opacity_is_an_app_settings_field() {
+        let left = TerminalSettings::default();
+        let mut right = left.clone();
+        right.suggestion_popup_opacity = 0.8;
+
+        assert!(!terminal_app_fields_equal(&left, &right));
     }
 
     #[test]

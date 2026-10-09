@@ -304,6 +304,7 @@ impl TerminalView {
             auto_copy_on_select: true,
             autocomplete_enabled: true,
             suggestion_popup_enabled: true,
+            suggestion_popup_opacity: initial_settings.suggestion_popup_opacity,
             middle_click_paste: true,
             right_click_paste: false,
             paste_image_upload: true,

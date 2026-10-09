@@ -6,7 +6,9 @@
 use crate::SftpView;
 use crate::left_remote_state::LeftRemoteConnectionState;
 use crate::ssh_config::{self, SshCredentialPromptPolicy};
-use gpui::{Context, Entity, IntoElement, ParentElement, Styled, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, IntoElement, ParentElement, Styled, WeakEntity, Window, div, prelude::*, px,
+};
 use gpui_component::{
     ActiveTheme, WindowExt as _,
     button::{Button, ButtonVariants},
@@ -68,7 +70,9 @@ impl SftpView {
         }
         let generation = self.next_left_connection_generation();
         let username = policy.username.then(|| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(t!("Credentials.username").to_string()))
+            cx.new(|cx| {
+                InputState::new(window, cx).placeholder(t!("Credentials.username").to_string())
+            })
         });
         let password = policy.password.then(|| {
             cx.new(|cx| {
@@ -160,9 +164,7 @@ impl SftpView {
                             )
                         })
                         .when_some(error.clone(), |this, error| {
-                            this.child(
-                                div().text_sm().text_color(cx.theme().danger).child(error),
-                            )
+                            this.child(div().text_sm().text_color(cx.theme().danger).child(error))
                         }),
                 )
                 .footer(left_credential_prompt_footer(target, view.clone()))
@@ -204,31 +206,28 @@ impl SftpView {
             return;
         }
 
-        let applied = self
-            .left_remote
-            .as_mut()
-            .map(|endpoint| {
-                // FTP 模式下运行时凭据只作用于 FTP 配置；SSH 模式作用于 SSH 配置。
-                if endpoint.remote_file_ftp.is_some() {
-                    let base = endpoint
-                        .remote_file_ftp
-                        .clone()
-                        .expect("FTP mode checked above");
-                    ssh_config::ftp_config_with_runtime_credentials(
-                        &base,
-                        username.as_deref(),
-                        password.as_deref(),
-                    )
-                    .map(|config| endpoint.remote_file_ftp = Some(config))
-                } else {
-                    ssh_config::ssh_config_with_runtime_credentials(
-                        &endpoint.config,
-                        username.as_deref(),
-                        password.as_deref(),
-                    )
-                    .map(|config| endpoint.config = config)
-                }
-            });
+        let applied = self.left_remote.as_mut().map(|endpoint| {
+            // FTP 模式下运行时凭据只作用于 FTP 配置；SSH 模式作用于 SSH 配置。
+            if endpoint.remote_file_ftp.is_some() {
+                let base = endpoint
+                    .remote_file_ftp
+                    .clone()
+                    .expect("FTP mode checked above");
+                ssh_config::ftp_config_with_runtime_credentials(
+                    &base,
+                    username.as_deref(),
+                    password.as_deref(),
+                )
+                .map(|config| endpoint.remote_file_ftp = Some(config))
+            } else {
+                ssh_config::ssh_config_with_runtime_credentials(
+                    &endpoint.config,
+                    username.as_deref(),
+                    password.as_deref(),
+                )
+                .map(|config| endpoint.config = config)
+            }
+        });
         match applied {
             Some(Ok(())) => {
                 if let Some(inputs) = self.left_credential_inputs.as_mut() {

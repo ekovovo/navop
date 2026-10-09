@@ -471,6 +471,13 @@
 - **验证方式**：覆盖手动确认卡片包含“安全确认、二次审批、自动执行”说明，自动执行卡片不含误导提示，ACP 后续 Public MCP 请求进入 Dialog 队列并展示完整脱敏参数，以及 Auto High/Critical 直接执行。
 - **适用范围**：`crates/ai_chat_view/src/acp/*`、`agent_transcript.rs`、`agent_view.rs`、`crates/public_mcp/src/permissions.rs`、`main/src/public_mcp_approval*`。
 
+- **标题**：Public MCP 的线上工具名必须净化，内部工具 id 保持带点分层
+- **触发信号**：Grok 这类 OpenAI 兼容客户端已经连上 Public MCP，却一个工具都列不出来（工具数为 0）；或新增带点工具 id 后，同一个工具在 ACP 与 MCP 两个入口显示成不同的名字。
+- **根因 / 约束**：Grok 注册函数时只接受 `[A-Za-z0-9_-]`，而 Navop 内部工具 id 用 `.` 分层（`ssh.command.poll`），带点的名字会在客户端注册阶段被整批丢弃；同时 Claude 等客户端接受 `.`，线上名字不能只按一种客户端的偏好来定。ACP 侧早已由 `ToolName` / `ToolNameAllocator` 完成净化，两条路各写一套会让同一工具在两个入口名字不一致。
+- **正确做法**：内部 id 一律不改（避免污染审批、审计与大量引用）；把 `PublicMcpToolRegistry::client_tools()` / `client_tool()` / `resolve_client_tool_name()` 作为唯一对外汇合点，复用 `agent_runtime::tools::{ToolName, ToolNameAllocator}`，并保持「先按内部 id 排序」的分配顺序，冲突（`sample.echo` 与 `sample_echo`）才会可复现且与 ACP 同名；`tools/call` 同时接受净化名与内部 id。对外暴露工具时不要直接读 `tools()`。
+- **验证方式**：协议层用例断言 `tools/list` 返回的每个名字都落在 `[A-Za-z0-9_-]` 内、且用净化名能成功执行 `tools/call`；单元用例覆盖 `sample.echo` / `sample_echo` 的冲突消解、对照表排序与双向解析；带点的内部 id 调用保持可用。
+- **适用范围**：`crates/public_mcp/src/tools/registry.rs`、`crates/public_mcp/src/protocol.rs`、`crates/agent_runtime/src/tools/spec.rs`、`crates/public_mcp/src/tools/agent_runtime_adapter.rs`。
+
 - **标题**：macOS 自定义标题栏中的可拖元素必须由应用显式接管标题栏拖动
 - **触发信号**：透明标题栏或 tab 栏中，按钮、输入框或 tab 的拖动被解释为窗口移动；为了规避问题出现 `allow_tab_drag = !is_macos` 一类平台禁用逻辑。
 - **根因 / 约束**：GPUI 的 `stop_propagation()` 和 `prevent_default()` 只影响 GPUI 事件传播，不能阻止 AppKit 把透明标题栏视为系统 window-move region。把 `NSWindow.isMovable` 设为 false 虽能规避抢事件，但会禁用 macOS Window 菜单的平铺与窗口管理快捷键。

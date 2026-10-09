@@ -72,9 +72,8 @@ impl AcpConnection {
             let result = match tokio::time::timeout(timeout, future.as_mut()).await {
                 Ok(result) => Some(result),
                 Err(_elapsed) => {
-                    let _ = connection.send_notification(CancelNotification::new(
-                        acp_session_id.clone(),
-                    ));
+                    let _ = connection
+                        .send_notification(CancelNotification::new(acp_session_id.clone()));
                     let _ = tokio::time::timeout(cancel_grace, future.as_mut()).await;
                     None
                 }
@@ -179,10 +178,7 @@ struct PromptContext {
 async fn finish_prompt(
     context: PromptContext,
     result: Option<
-        Result<
-            agent_client_protocol::schema::PromptResponse,
-            agent_client_protocol::Error,
-        >,
+        Result<agent_client_protocol::schema::PromptResponse, agent_client_protocol::Error>,
     >,
 ) {
     let closed_error = connection_closed_error(&context.agent_id, &context.agent_name, None);

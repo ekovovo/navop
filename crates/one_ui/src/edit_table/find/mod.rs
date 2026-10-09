@@ -245,8 +245,7 @@ pub fn scroll_target_for_match(
         return Some(match_row);
     }
     let page = visible.len();
-    Some(match_row.min(rows_count.saturating_sub(page)))
-        .filter(|target| *target != current_top)
+    Some(match_row.min(rows_count.saturating_sub(page))).filter(|target| *target != current_top)
 }
 
 /// 命中高亮的背景色。

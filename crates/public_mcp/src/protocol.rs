@@ -124,7 +124,9 @@ impl ServerHandler for PublicMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        let tools = self.tool_registry.tools();
+        // 只暴露函数调用安全的名字（`.` → `_`），否则 Grok 这类只接受
+        // `[A-Za-z0-9_-]` 的客户端会把整批工具丢掉（issue #194）。
+        let tools = self.tool_registry.client_tools();
         future::ready(Ok(ListToolsResult {
             tools,
             next_cursor: None,
@@ -133,7 +135,7 @@ impl ServerHandler for PublicMcpServer {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_registry.get_tool(name)
+        self.tool_registry.client_tool(name)
     }
 
     fn call_tool(
@@ -146,7 +148,12 @@ impl ServerHandler for PublicMcpServer {
             permission_mode: self.permission_mode.get(),
             approver: self.approval_manager.clone(),
         };
-        let name = request.name.to_string();
+        // 客户端用的是净化后的名字，这里翻回内部 id 再分发；无法解析时保持原样，
+        // 让注册表给出统一的 unknown tool 错误。
+        let name = self
+            .tool_registry
+            .resolve_client_tool_name(request.name.as_ref())
+            .unwrap_or_else(|| request.name.to_string());
         let arguments = request.arguments;
         async move { tool_registry.call_tool(&name, arguments, context).await }
     }

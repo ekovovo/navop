@@ -11,10 +11,10 @@ use extension_protocol::resource::{ResourceInvokeParams, ResourceOpenResult};
 use extension_protocol::result_ref::ResultRef;
 use extension_runtime::ExtensionRuntimeCatalog;
 use extension_runtime::RegisteredResourceWorkbenchContribution;
+use extension_runtime::extension::manifest::load_from_dir;
 use extension_runtime::extension::manifest::{
     ResourceWorkbenchEffect, ResourceWorkbenchOperation, ResourceWorkbenchOperationMode,
 };
-use extension_runtime::extension::manifest::load_from_dir;
 use futures::future::BoxFuture;
 use tokio::io::duplex;
 
@@ -1290,9 +1290,7 @@ async fn workbench_invoked_event_streams_are_registered_by_the_host() {
     );
 
     client
-        .close_event_stream(&extension_protocol::event_stream::EventCloseParams {
-            stream_id: id,
-        })
+        .close_event_stream(&extension_protocol::event_stream::EventCloseParams { stream_id: id })
         .await
         .unwrap();
     assert_eq!(

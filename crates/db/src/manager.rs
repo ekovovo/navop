@@ -525,8 +525,7 @@ impl ConnectionSession {
     async fn close(&self) {
         let mut connection = self.lock_connection().await;
         let disconnect = connection.disconnect();
-        let outcome =
-            tokio::time::timeout(network_deadline::DISCONNECT_TIMEOUT, disconnect).await;
+        let outcome = tokio::time::timeout(network_deadline::DISCONNECT_TIMEOUT, disconnect).await;
         match outcome {
             Ok(Ok(())) => info!("Closed session: {}", self.session_id),
             Ok(Err(e)) => error!("Failed to disconnect session {}: {}", self.session_id, e),

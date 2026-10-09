@@ -9,27 +9,35 @@ pub enum ConnectionDataEvent {
     /// 连接被更新（名称、配置等）
     ConnectionUpdated { connection: StoredConnection },
     /// 连接被删除
+    ///
+    /// `last_synced_at` 是**删除前**那一行记录的同步基线（远端 `updated_at` 的秒值）。
+    /// 个人同步要靠它判断「远端是否在本地删除之后又被别的设备改过」——那时直接推
+    /// 墓碑会抹掉对方的改动，改为挂起 `LocalDeletedRemoteModified` 交给用户决定。
+    /// 拿不到基线时传 `None`（保持「删除胜出」的既有行为）。
     ConnectionDeleted {
         connection_id: i64,
         cloud_id: Option<String>,
+        last_synced_at: Option<i64>,
     },
     /// 工作区被创建
     WorkspaceCreated { workspace_id: i64 },
     /// 工作区被更新
     WorkspaceUpdated { workspace_id: i64 },
-    /// 工作区被删除
+    /// 工作区被删除（`last_synced_at` 语义同 [`Self::ConnectionDeleted`]）
     WorkspaceDeleted {
         workspace_id: i64,
         cloud_id: Option<String>,
+        last_synced_at: Option<i64>,
     },
     /// 钥匙串条目被创建。事件不得携带任何秘密字段。
     CredentialCreated { credential_id: i64 },
     /// 钥匙串条目被更新。事件不得携带任何秘密字段。
     CredentialUpdated { credential_id: i64 },
-    /// 钥匙串条目被删除。
+    /// 钥匙串条目被删除（`last_synced_at` 语义同 [`Self::ConnectionDeleted`]）。
     CredentialDeleted {
         credential_id: i64,
         cloud_id: Option<String>,
+        last_synced_at: Option<i64>,
     },
     /// Schema 结构变更（DDL 执行后触发）
     SchemaChanged {

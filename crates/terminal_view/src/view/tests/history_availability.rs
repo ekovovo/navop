@@ -127,10 +127,49 @@ fn history_prompt_overlay_renders_max_height_and_scrollbar() {
 
     assert!(rules_source.contains("HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT"));
     assert!(rules_source.contains("content_height.min(px(HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT))"));
+    // 弹层背景必须走带透明度治理的 helper（issue #73），不允许渲染层直接裸用背景色；
+    // 透明度必须来自用户设置，而不是又一个写死的常量。
+    assert!(render_source.contains("history_prompt_dropdown_background("));
+    assert!(render_source.contains("self.suggestion_popup_opacity"));
     assert!(render_source.contains(".overflow_y_scroll()"));
     assert!(render_source.contains(".track_scroll(&self.history_prompt_scroll_handle)"));
     assert!(render_source.contains("scroll_to_item(index)"));
     assert!(actions_source.contains("scroll_history_prompt_selection_into_view()"));
+}
+
+#[test]
+fn suggestion_popup_opacity_travels_from_the_settings_panel_to_the_dropdown() {
+    // issue #73：弹层背景不透明度现在由用户设置驱动，而这条链有 6 段
+    // （设置面板滑块 → sidebar 事件 → 视图 setter → settings.json 落盘 →
+    // 回灌视图 → 渲染弹层）。任何一段漏接都会静默失效 —— 弹层永远停在默认值，
+    // 单测却全绿。所以这里逐段按源码锚点锁住接线，而不是只测两端。
+    let panel = include_str!("../../sidebar/settings_panel.rs");
+    assert!(panel.contains("SuggestionPopupOpacityChanged"));
+    assert!(panel.contains("suggestion_popup_opacity_slider"));
+
+    let sidebar = include_str!("../../sidebar/mod.rs");
+    assert!(sidebar.contains("SettingsPanelEvent::SuggestionPopupOpacityChanged"));
+    assert!(sidebar.contains("TerminalSidebarEvent::SuggestionPopupOpacityChanged"));
+
+    let events = include_str!("../sidebar_events.rs");
+    assert!(events.contains("TerminalSidebarEvent::SuggestionPopupOpacityChanged("));
+    assert!(events.contains("self.set_suggestion_popup_opacity("));
+
+    let preferences = include_str!("../preferences.rs");
+    assert!(preferences.contains("settings.suggestion_popup_opacity = opacity;"));
+
+    let settings = include_str!("../../settings.rs");
+    assert!(
+        settings
+            .contains("settings.terminal_suggestion_popup_opacity = next.suggestion_popup_opacity;")
+    );
+
+    let appearance = include_str!("../appearance.rs");
+    assert!(appearance.contains("self.suggestion_popup_opacity ="));
+    assert!(appearance.contains("sidebar.set_suggestion_popup_opacity("));
+
+    let render = include_str!("../history_render.rs");
+    assert!(render.contains("self.suggestion_popup_opacity"));
 }
 
 #[test]

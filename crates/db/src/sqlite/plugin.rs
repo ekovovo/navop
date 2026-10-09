@@ -1937,10 +1937,12 @@ mod tests {
         let design = TableDesign {
             database_name: "main".to_string(),
             table_name: "users".to_string(),
-            columns: vec![ColumnDefinition::new("id")
-                .data_type("INTEGER")
-                .primary_key(true)
-                .auto_increment(true)],
+            columns: vec![
+                ColumnDefinition::new("id")
+                    .data_type("INTEGER")
+                    .primary_key(true)
+                    .auto_increment(true),
+            ],
             indexes: vec![],
             foreign_keys: vec![],
             options: TableOptions::default(),

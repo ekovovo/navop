@@ -18,7 +18,9 @@ pub struct PersonalSyncItemSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonalSyncRecordConflict {
-    pub local_id: String,
+    /// 冲突对应的本地条目 id；`None` 表示**没有**本地对应行（例如「本地已删除、
+    /// 远端被别的设备改过」这种冲突，检测时本地行已经不存在了）。
+    pub local_id: Option<String>,
     pub cloud_id: String,
     pub data_type: String,
     pub conflict_type: PersonalConflictType,
@@ -152,7 +154,7 @@ fn plan_existing_item(
 
     match (local_changed, remote_changed) {
         (true, true) => plan.conflicts.push(PersonalSyncRecordConflict {
-            local_id: item.local_id.clone(),
+            local_id: Some(item.local_id.clone()),
             cloud_id: remote.id.clone(),
             data_type: remote.data_type.clone(),
             conflict_type: PersonalConflictType::BothModified,

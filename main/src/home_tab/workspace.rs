@@ -172,12 +172,15 @@ impl HomePage {
     pub(super) fn handle_delete_workspace(&mut self, workspace_id: i64, cx: &mut Context<Self>) {
         let storage = cx.global::<GlobalStorageState>().storage.clone();
 
-        // 获取工作空间的 cloud_id，用于删除云端数据
-        let cloud_id = self
+        // 获取工作空间的 cloud_id（用于删除云端数据），并顺带取出删除前的同步基线：
+        // 个人同步要靠它判断远端是否在本地删除之后又被别的设备改过
+        // （详见 `ConnectionDataEvent::ConnectionDeleted`）。行删掉之后就取不到了。
+        let (cloud_id, deleted_last_synced_at) = self
             .workspaces
             .iter()
             .find(|w| w.id == Some(workspace_id))
-            .and_then(|w| w.cloud_id.clone());
+            .map(|w| (w.cloud_id.clone(), w.last_synced_at))
+            .unwrap_or_default();
 
         // 如果用户已登录且工作空间有 cloud_id，需要同时删除云端
         let cloud_client = if cloud_id.is_some() && self.current_user.is_some() {
@@ -231,10 +234,19 @@ impl HomePage {
                     _ = this.update(cx, |this, cx| {
                         this.workspaces.retain(|w| w.id != Some(workspace_id));
                         this.filtered_workspace_ids.remove(&workspace_id);
+                        if let Some(cloud_id) = &cloud_id {
+                            // 本地分组没了，遗留的冲突也就解不开了，删除时一并丢掉。
+                            crate::personal_sync_runtime::forget_personal_conflict(
+                                &storage,
+                                one_core::cloud_sync::data_type::WORKSPACE,
+                                cloud_id,
+                            );
+                        }
                         emit_connection_event(
                             ConnectionDataEvent::WorkspaceDeleted {
                                 workspace_id,
                                 cloud_id: cloud_id.clone(),
+                                last_synced_at: deleted_last_synced_at,
                             },
                             cx,
                         );

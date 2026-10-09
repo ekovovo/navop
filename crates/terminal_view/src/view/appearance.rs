@@ -1,4 +1,5 @@
 use super::*;
+use one_core::settings::AppSettings;
 
 impl TerminalView {
     /// 获取连接类型（本地 / SSH）
@@ -35,6 +36,7 @@ impl TerminalView {
         auto_copy: bool,
         autocomplete_enabled: bool,
         suggestion_popup_enabled: bool,
+        suggestion_popup_opacity: f32,
         middle_click_paste: bool,
         right_click_paste: bool,
         paste_image_upload: bool,
@@ -62,6 +64,8 @@ impl TerminalView {
         self.auto_copy_on_select = auto_copy;
         self.apply_autocomplete_enabled(autocomplete_enabled, cx);
         self.apply_suggestion_popup_enabled(suggestion_popup_enabled, cx);
+        self.suggestion_popup_opacity =
+            AppSettings::normalize_terminal_suggestion_popup_opacity(suggestion_popup_opacity);
         if !self.history_prompt_enabled(cx) {
             self.suggestion_debounce.take();
             self.hide_history_prompt_dropdown();
@@ -87,6 +91,7 @@ impl TerminalView {
             sidebar.set_paste_image_upload(paste_image_upload, cx);
             sidebar.set_vim_scroll_to_arrow_keys(vim_scroll_to_arrow_keys, cx);
             sidebar.set_sync_path_enabled(sync_path, cx);
+            sidebar.set_suggestion_popup_opacity(suggestion_popup_opacity, window, cx);
         });
 
         cx.notify();
@@ -104,6 +109,7 @@ impl TerminalView {
             settings.auto_copy,
             settings.enable_autocomplete,
             settings.show_suggestion_popup,
+            settings.suggestion_popup_opacity,
             settings.middle_click_paste,
             settings.right_click_paste,
             settings.paste_image_upload,

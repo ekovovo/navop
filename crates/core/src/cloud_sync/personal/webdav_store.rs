@@ -48,12 +48,43 @@ use super::{
 
 const MANIFEST_FILE: &str = "manifest.json";
 const INDEX_FILE: &str = "index.json";
+/// 远端互斥锁文件（见 [`WebDavLockFile`]）。
+const LOCK_FILE: &str = "lock.json";
 const RECORD_PREFIX: &str = "record-";
 const TOMBSTONE_PREFIX: &str = "tombstone-";
 const FILE_SUFFIX: &str = ".json";
 const KEY_SEPARATOR: char = '/';
 /// 写 `index.json` 冲突时的重试次数。
 const INDEX_WRITE_ATTEMPTS: usize = 2;
+/// 远端锁在多久没被释放后可以接管（毫秒）。
+///
+/// 持有者崩溃时不会执行释放，只能靠过期；一次 pass 正常是秒级，5 分钟足够宽裕。
+const LOCK_STALE_AFTER_MILLIS: i64 = 300_000;
+
+/// 远端锁文件内容。
+///
+/// WebDAV 各服务端对「不存在才创建」的条件请求（`If-None-Match: *`）支持不一，所以
+/// 这里不依赖原子创建，改用 **nonce + 回读确认**：谁写进去的 nonce 最后被读到，谁
+/// 才算拿到锁；两个设备同时写时只有一个能通过回读。
+///
+/// 释放**不用 `DELETE`**（部分服务端会 405），而是用 `PUT` 把 `released` 置为 `true`
+/// —— `GET` / `PUT` 是任何 WebDAV 服务端都有的基础方法。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WebDavLockFile {
+    owner: String,
+    nonce: String,
+    acquired_at: i64,
+    /// 持有者主动释放后置位；未释放且未过期时阻止其他实例同步。
+    #[serde(default)]
+    released: bool,
+}
+
+impl WebDavLockFile {
+    /// 这把锁是否还在阻止别人同步（未释放且未过期）。
+    fn blocks_others(&self, now: i64) -> bool {
+        !self.released && now.saturating_sub(self.acquired_at) < LOCK_STALE_AFTER_MILLIS
+    }
+}
 
 /// WebDAV 连接凭据。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,9 +325,24 @@ impl WebDavSyncStore {
             // 首次使用时还没有索引，视为空索引。
             return Ok(WebDavSyncIndex::default());
         };
-        serde_json::from_slice(&bytes).map_err(|error| {
-            SyncStoreError::Parse(format!("{INDEX_FILE} 解析失败: {error}"))
-        })
+        serde_json::from_slice(&bytes)
+            .map_err(|error| SyncStoreError::Parse(format!("{INDEX_FILE} 解析失败: {error}")))
+    }
+
+    /// 读远端锁文件；文件不存在时返回 `None`。
+    ///
+    /// 内容损坏时也当作 `None`：坏掉的锁文件不该把同步永久卡死。
+    async fn load_lock_file(&self) -> Result<Option<WebDavLockFile>, SyncStoreError> {
+        let Some(bytes) = self.download(LOCK_FILE).await? else {
+            return Ok(None);
+        };
+        match serde_json::from_slice::<WebDavLockFile>(&bytes) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(error) => {
+                tracing::warn!("[webdav] {LOCK_FILE} 解析失败，按「没有锁」处理: {error}");
+                Ok(None)
+            }
+        }
     }
 
     /// 读改写索引：取出最新索引，应用 `mutate`，再整体回写。
@@ -324,9 +370,8 @@ impl WebDavSyncStore {
             last_error = self.ensure_success(&reply).err();
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            SyncStoreError::Io(format!("写入 {INDEX_FILE} 失败且原因未知"))
-        }))
+        Err(last_error
+            .unwrap_or_else(|| SyncStoreError::Io(format!("写入 {INDEX_FILE} 失败且原因未知"))))
     }
 
     // ------------------------------------------------------------------
@@ -336,8 +381,8 @@ impl WebDavSyncStore {
     async fn ensure_manifest(&self) -> Result<(), SyncStoreError> {
         match self.download(MANIFEST_FILE).await? {
             Some(bytes) => {
-                let manifest: PersonalSyncManifest = serde_json::from_slice(&bytes)
-                    .map_err(|error| {
+                let manifest: PersonalSyncManifest =
+                    serde_json::from_slice(&bytes).map_err(|error| {
                         SyncStoreError::Parse(format!("{MANIFEST_FILE} 解析失败: {error}"))
                     })?;
                 manifest.validate()
@@ -449,9 +494,7 @@ impl PersonalSyncStore for WebDavSyncStore {
             .records
             .get(&key)
             .map(|entry| entry.version)
-            .ok_or_else(|| {
-                SyncStoreError::Conflict(format!("missing {data_type} record {id}"))
-            })?;
+            .ok_or_else(|| SyncStoreError::Conflict(format!("missing {data_type} record {id}")))?;
 
         if let Some(expected) = expected_version {
             if current_version != expected {
@@ -462,9 +505,10 @@ impl PersonalSyncStore for WebDavSyncStore {
         }
 
         let file_name = record_file_name(data_type, id);
-        let bytes = self.download(&file_name).await?.ok_or_else(|| {
-            SyncStoreError::Conflict(format!("missing {data_type} record {id}"))
-        })?;
+        let bytes = self
+            .download(&file_name)
+            .await?
+            .ok_or_else(|| SyncStoreError::Conflict(format!("missing {data_type} record {id}")))?;
         let mut record: CloudSyncData = serde_json::from_slice(&bytes)?;
 
         let deleted_at = now_millis();
@@ -496,9 +540,89 @@ impl PersonalSyncStore for WebDavSyncStore {
     }
 
     async fn acquire_lock(&self, owner: &SyncDeviceId) -> Result<SyncStoreLock, SyncStoreError> {
-        Ok(SyncStoreLock {
-            owner: owner.clone(),
-        })
+        let nonce = super::new_lock_nonce();
+
+        // 锁是**尽力而为**的：读不到远端锁文件（网络抖动、权限、服务端不支持写这个
+        // 文件名）时降级成「不加锁继续」，而不是把本来能跑的同步变成失败。
+        // 只有「明确读到另一台设备正持有未过期的锁」才让路。
+        let existing = match self.load_lock_file().await {
+            Ok(existing) => existing,
+            Err(error) => {
+                tracing::warn!("[webdav] 无法读取同步锁，本轮不加锁继续: {error}");
+                return Ok(SyncStoreLock::owned_by(owner.clone()));
+            }
+        };
+        if let Some(existing) = existing.filter(|lock| lock.blocks_others(now_millis())) {
+            tracing::info!(
+                owner = %existing.owner,
+                acquired_at = existing.acquired_at,
+                "[webdav] 另一台设备正在同步，本轮让路"
+            );
+            return Err(SyncStoreError::LockTimeout);
+        }
+
+        let lock = WebDavLockFile {
+            owner: owner.0.clone(),
+            nonce: nonce.clone(),
+            acquired_at: now_millis(),
+            released: false,
+        };
+        if let Err(error) = self.upload(LOCK_FILE, &lock).await {
+            tracing::warn!("[webdav] 写入同步锁失败，本轮不加锁继续: {error}");
+            return Ok(SyncStoreLock::owned_by(owner.clone()));
+        }
+
+        // 回读确认：读到别人的 nonce 说明和另一台设备撞上了（服务端没有原子创建），
+        // 让路；回读本身失败则退化成不加锁，避免多一次网络操作把同步卡住。
+        match self.load_lock_file().await {
+            Ok(Some(stored)) if stored.nonce == nonce => {
+                Ok(SyncStoreLock::with_token(owner.clone(), nonce))
+            }
+            Ok(Some(stored)) => {
+                tracing::info!(
+                    owner = %stored.owner,
+                    "[webdav] 同步锁被另一台设备抢到，本轮让路"
+                );
+                Err(SyncStoreError::LockTimeout)
+            }
+            Ok(None) => {
+                tracing::warn!("[webdav] 同步锁回读为空，本轮不加锁继续");
+                Ok(SyncStoreLock::owned_by(owner.clone()))
+            }
+            Err(error) => {
+                tracing::warn!("[webdav] 同步锁回读失败，本轮不加锁继续: {error}");
+                Ok(SyncStoreLock::owned_by(owner.clone()))
+            }
+        }
+    }
+
+    async fn release_lock(&self, lock: &SyncStoreLock) -> Result<(), SyncStoreError> {
+        let Some(nonce) = lock.release_token() else {
+            // 没拿到远端锁（降级路径）就没什么可释放的。
+            return Ok(());
+        };
+        // 只释放自己的那一次持有：TTL 过期后锁可能已经被别人接管，改掉它会把对方的
+        // 互斥一起破坏。读失败就保持原样，交给 TTL 过期自愈。
+        match self.load_lock_file().await {
+            Ok(Some(stored)) if stored.nonce == nonce => {}
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                tracing::warn!("[webdav] 释放同步锁前读取失败，保持原样: {error}");
+                return Ok(());
+            }
+        }
+
+        let released = WebDavLockFile {
+            owner: lock.owner.0.clone(),
+            nonce: nonce.to_string(),
+            acquired_at: now_millis(),
+            released: true,
+        };
+        if let Err(error) = self.upload(LOCK_FILE, &released).await {
+            // 释放失败不该让同步失败：锁会在 TTL 之后自动失效。
+            tracing::warn!("[webdav] 释放同步锁失败（将由 TTL 过期自愈）: {error}");
+        }
+        Ok(())
     }
 }
 
@@ -616,19 +740,20 @@ fn reply_snippet(reply: &HttpReply) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use futures::future::BoxFuture;
     use futures::FutureExt;
+    use futures::future::BoxFuture;
     use gpui::http_client::{AsyncBody, HttpClient, Request, Response, StatusCode, Url};
 
     use super::{
-        INDEX_FILE, MANIFEST_FILE, WebDavCredentials, WebDavSyncStore, WebDavSyncIndex, entry_key,
-        normalize_base_url, record_file_name, tombstone_file_name,
+        INDEX_FILE, LOCK_FILE, MANIFEST_FILE, WebDavCredentials, WebDavSyncIndex, WebDavSyncStore,
+        entry_key, normalize_base_url, record_file_name, tombstone_file_name,
     };
     use crate::cloud_sync::models::{CloudSyncData, data_type};
-    use crate::cloud_sync::personal::{PersonalSyncStore, SyncStoreError};
     use crate::cloud_sync::personal::test_support::test_record;
+    use crate::cloud_sync::personal::{PersonalSyncStore, SyncDeviceId, SyncStoreError};
 
     /// 一个实现 GET / PUT / MKCOL 的内存版 WebDAV 服务端。
     ///
@@ -644,6 +769,9 @@ mod tests {
         forced_status: Option<u16>,
         /// 服务端错误响应体。
         error_body: String,
+        /// 打开后所有对 `lock.json` 的 `PUT` 都被丢弃：模拟「两台设备同时写锁，
+        /// 我们写进去的内容被对方覆盖」——回读时会读到别人的 nonce。
+        lock_writes_are_ignored: Arc<AtomicBool>,
         /// 记录每个请求的方法，便于断言只用到基础方法。
         methods: Arc<Mutex<Vec<String>>>,
     }
@@ -686,7 +814,11 @@ mod tests {
         }
 
         fn collection_exists(&self) -> bool {
-            !self.collections.lock().expect("collections lock").is_empty()
+            !self
+                .collections
+                .lock()
+                .expect("collections lock")
+                .is_empty()
         }
 
         fn count(&self) -> usize {
@@ -771,7 +903,11 @@ mod tests {
                         None => build_response(StatusCode::NOT_FOUND.as_u16(), Vec::new()),
                     },
                     "PUT" => {
-                        files.insert(file_name, payload);
+                        let ignored = server.lock_writes_are_ignored.load(Ordering::Relaxed)
+                            && file_name == LOCK_FILE;
+                        if !ignored {
+                            files.insert(file_name, payload);
+                        }
                         build_response(StatusCode::CREATED.as_u16(), Vec::new())
                     }
                     "DELETE" => {
@@ -1140,15 +1276,19 @@ mod tests {
             .upsert_record(&record_for("cloud-1"), None)
             .await
             .expect("upsert");
-        store
-            .list_records(None, None)
+        store.list_records(None, None).await.expect("list");
+        // 互斥锁也只用基础方法：获取是 GET + PUT，释放是 GET + PUT（**刻意不用
+        // DELETE** / PROPFIND —— 部分服务端会 405 或不支持）。
+        let lock = store
+            .acquire_lock(&SyncDeviceId("test-device".to_string()))
             .await
-            .expect("list");
+            .expect("acquire lock");
+        store.release_lock(&lock).await.expect("release lock");
 
         let mut methods = server.methods_seen();
         methods.sort();
         methods.dedup();
-        // MKCOL 只在集合缺失时发一次；刻意不使用 PROPFIND / PROPPATCH。
+        // MKCOL 只在集合缺失时发一次；刻意不使用 PROPFIND / PROPPATCH / DELETE。
         assert_eq!(
             vec!["GET".to_string(), "MKCOL".to_string(), "PUT".to_string()],
             methods
@@ -1186,7 +1326,10 @@ mod tests {
         let methods = server.methods_seen();
         assert_eq!(
             1,
-            methods.iter().filter(|method| method.as_str() == "MKCOL").count(),
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "MKCOL")
+                .count(),
             "集合已就绪后不应重复发 MKCOL，实际方法序列：{methods:?}"
         );
     }
@@ -1200,7 +1343,10 @@ mod tests {
         match result {
             Err(SyncStoreError::DirectoryUnavailable(message)) => {
                 assert!(message.contains("目标目录不存在"), "message: {message}");
-                assert!(message.contains("创建"), "提示应告诉用户怎么建目录：{message}");
+                assert!(
+                    message.contains("创建"),
+                    "提示应告诉用户怎么建目录：{message}"
+                );
             }
             other => panic!("期望 DirectoryUnavailable，实际为 {other:?}"),
         }
@@ -1222,13 +1368,158 @@ mod tests {
 
         assert_eq!(2, server.record_count());
         let index = server.index();
-        assert!(index
-            .records
-            .contains_key(&entry_key(data_type::CONNECTION, "cloud-1")));
-        assert!(index
-            .records
-            .contains_key(&entry_key(data_type::CREDENTIAL, "cred-1")));
+        assert!(
+            index
+                .records
+                .contains_key(&entry_key(data_type::CONNECTION, "cloud-1"))
+        );
+        assert!(
+            index
+                .records
+                .contains_key(&entry_key(data_type::CREDENTIAL, "cred-1"))
+        );
         // manifest + index + 两条记录
         assert_eq!(4, server.count());
+    }
+
+    // ------------------------------------------------------------------
+    // 跨设备互斥
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lock_blocks_a_second_device_until_it_is_released() {
+        let server = MemoryWebDav::new();
+        let first = store(&server);
+        let second = store(&server);
+
+        let lock = first
+            .acquire_lock(&SyncDeviceId("first".to_string()))
+            .await
+            .expect("第一台设备拿到锁");
+        assert!(server.contains(LOCK_FILE), "锁应写在远端的 lock.json");
+
+        let refused = second
+            .acquire_lock(&SyncDeviceId("second".to_string()))
+            .await;
+        assert!(
+            matches!(refused, Err(SyncStoreError::LockTimeout)),
+            "另一台设备正在同步时必须让路，实际为 {refused:?}"
+        );
+
+        first.release_lock(&lock).await.expect("release lock");
+        second
+            .acquire_lock(&SyncDeviceId("second".to_string()))
+            .await
+            .expect("释放之后第二台设备可以同步");
+    }
+
+    /// 持有者崩溃时不会执行释放，只能靠 TTL：过期锁必须能被接管，
+    /// 否则一次崩溃会让远端同步永久停摆。
+    #[tokio::test]
+    async fn expired_remote_lock_can_be_taken_over() {
+        let server = MemoryWebDav::new();
+        write_lock_file(
+            &server,
+            serde_json::json!({
+                "owner": "crashed-instance",
+                "nonce": "stale-nonce",
+                "acquired_at": 0,
+                "released": false,
+            }),
+        );
+
+        let lock = store(&server)
+            .acquire_lock(&SyncDeviceId("local".to_string()))
+            .await
+            .expect("过期锁应能被接管");
+
+        assert_eq!("local", lock.owner.0);
+    }
+
+    /// 释放只能动自己的那一次持有：锁被别的设备接管之后，前一个持有者再释放
+    /// 不能把对方的锁标记成已释放。
+    #[tokio::test]
+    async fn release_does_not_clobber_a_lock_owned_by_another_device() {
+        let server = MemoryWebDav::new();
+        let store = store(&server);
+        let lock = store
+            .acquire_lock(&SyncDeviceId("first".to_string()))
+            .await
+            .expect("acquire lock");
+
+        // 模拟「我们的锁因为超过 TTL 被第二台设备接管」。
+        write_lock_file(
+            &server,
+            serde_json::json!({
+                "owner": "second",
+                "nonce": "second-nonce",
+                "acquired_at": i64::MAX,
+                "released": false,
+            }),
+        );
+
+        store.release_lock(&lock).await.expect("release lock");
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&server.file(LOCK_FILE).expect("lock file still exists"))
+                .expect("lock file is json");
+        assert_eq!("second-nonce", stored["nonce"]);
+        assert_eq!(serde_json::json!(false), stored["released"]);
+    }
+
+    /// 并发写锁时靠「回读 nonce」定胜负：服务端没有原子的「不存在才创建」，
+    /// 我们写进去的内容可能立刻被对方覆盖 —— 回读到别人的 nonce 就必须让路，
+    /// 否则两台设备会同时改 `index.json`。
+    #[tokio::test]
+    async fn losing_the_lock_write_race_is_reported_as_a_lock_timeout() {
+        let server = MemoryWebDav::new();
+        // 先有一把**过期**的外来锁：第 1 步的「是否有人在同步」不该拦住我们，
+        // 这样才走得到「写入 + 回读」这一段。
+        write_lock_file(
+            &server,
+            serde_json::json!({
+                "owner": "other-device",
+                "nonce": "other-nonce",
+                "acquired_at": 0,
+                "released": false,
+            }),
+        );
+        // 我们写进去的锁被对方覆盖 ⇒ 回读会读到 "other-nonce"。
+        server
+            .lock_writes_are_ignored
+            .store(true, Ordering::Relaxed);
+
+        let refused = store(&server)
+            .acquire_lock(&SyncDeviceId("local".to_string()))
+            .await;
+
+        assert!(
+            matches!(refused, Err(SyncStoreError::LockTimeout)),
+            "写锁被对方覆盖时必须让路，实际为 {refused:?}"
+        );
+    }
+
+    /// 锁只是防并发：远端读写锁文件失败时降级成「不加锁继续」，
+    /// 不能把本来能跑的同步变成失败。
+    #[tokio::test]
+    async fn lock_infrastructure_failure_degrades_to_no_lock() {
+        let server = MemoryWebDav::failing(500);
+        let lock = store(&server)
+            .acquire_lock(&SyncDeviceId("local".to_string()))
+            .await
+            .expect("锁不可用时应降级继续同步");
+
+        // 降级路径没有远端锁可释放：不能因此报错，也不能去动远端文件。
+        store(&server)
+            .release_lock(&lock)
+            .await
+            .expect("降级路径的释放是空操作");
+    }
+
+    fn write_lock_file(server: &Arc<MemoryWebDav>, value: serde_json::Value) {
+        server.files.lock().expect("files lock").insert(
+            LOCK_FILE.to_string(),
+            serde_json::to_vec(&value).expect("lock json"),
+        );
     }
 }

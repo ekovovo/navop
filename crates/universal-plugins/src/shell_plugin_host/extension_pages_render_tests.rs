@@ -52,7 +52,10 @@ mod tests {
         ("mqtt/ui/subscriptions.js", &["Input", "Select"]),
         ("rocketmq/ui/overview.js", &["Tag", "Button"]),
         ("rocketmq/ui/messages.js", &["Input", "Select", "Button"]),
-        ("rocketmq/ui/send-message.js", &["Input", "Select", "Textarea"]),
+        (
+            "rocketmq/ui/send-message.js",
+            &["Input", "Select", "Textarea"],
+        ),
         ("docker/ui/log-viewer.js", &["Input"]),
         ("dev-tools/ui/workbench.js", &["Input"]),
     ];
@@ -269,7 +272,10 @@ export default class Migrated extends View {
 
         let (mut context, loaded, _runtime) = load(root.path(), "main.js", cx);
         let (error, tree) = render_settled(&mut context, &loaded, "main.js");
-        assert_eq!(error, None, "元素用组件库、状态用 gpui-base 必须能渲染:\n{tree}");
+        assert_eq!(
+            error, None,
+            "元素用组件库、状态用 gpui-base 必须能渲染:\n{tree}"
+        );
         assert!(
             tree.contains("Input :aria_label(registered)"),
             "Input 必须来自组件库注册表:\n{tree}"

@@ -19,6 +19,7 @@ use gpui_component::{
     notification::Notification,
     scroll::ScrollableElement,
     select::{Select, SelectEvent, SelectItem, SelectState},
+    slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     try_parse_color, v_flex,
 };
@@ -150,6 +151,8 @@ pub enum SettingsPanelEvent {
     AutocompleteChanged(bool),
     /// 弹框候选词开关
     SuggestionPopupChanged(bool),
+    /// 弹框候选词背景不透明度（0.5–1.0）
+    SuggestionPopupOpacityChanged(f32),
     /// 中键粘贴开关
     MiddleClickPasteChanged(bool),
     /// 右键快速粘贴开关
@@ -206,6 +209,10 @@ pub struct SettingsPanel {
     autocomplete_enabled: bool,
     /// 弹框候选词
     suggestion_popup_enabled: bool,
+    /// 弹框候选词背景不透明度
+    suggestion_popup_opacity: f32,
+    /// 弹框候选词背景不透明度滑块
+    suggestion_popup_opacity_slider: Entity<SliderState>,
     /// 中键粘贴
     middle_click_paste: bool,
     /// 右键快速粘贴
@@ -264,6 +271,16 @@ impl SettingsPanel {
         let selection_highlight = AppSettings::global(cx).terminal_selection_highlight;
         let show_line_timestamps = AppSettings::global(cx).terminal_show_timestamps;
         let show_line_numbers = AppSettings::global(cx).terminal_show_line_numbers;
+        let suggestion_popup_opacity = AppSettings::normalize_terminal_suggestion_popup_opacity(
+            AppSettings::global(cx).terminal_suggestion_popup_opacity,
+        );
+        let suggestion_popup_opacity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(AppSettings::MIN_TERMINAL_SUGGESTION_POPUP_OPACITY)
+                .max(AppSettings::MAX_TERMINAL_SUGGESTION_POPUP_OPACITY)
+                .step(0.02)
+                .default_value(suggestion_popup_opacity)
+        });
         let scrollback_lines_input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(AppSettings::DEFAULT_TERMINAL_SCROLLBACK_LINES.to_string())
@@ -410,6 +427,28 @@ impl SettingsPanel {
             },
         ));
 
+        // 订阅弹层背景不透明度滑块。
+        // 拖动过程中只重绘面板（百分比读数直接读滑块 state，弹层此时并不在屏幕上），
+        // 松手时才写回设置，避免一路拖动把 settings.json 写十几遍。
+        subscriptions.push(cx.subscribe(
+            &suggestion_popup_opacity_slider,
+            |this, _slider, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(_) => {
+                    cx.notify();
+                }
+                SliderEvent::Release(value) => {
+                    let opacity =
+                        AppSettings::normalize_terminal_suggestion_popup_opacity(value.start());
+                    if this.suggestion_popup_opacity == opacity {
+                        return;
+                    }
+                    this.suggestion_popup_opacity = opacity;
+                    cx.emit(SettingsPanelEvent::SuggestionPopupOpacityChanged(opacity));
+                    cx.notify();
+                }
+            },
+        ));
+
         Self {
             search_input_state,
             font_size_input_state,
@@ -428,6 +467,8 @@ impl SettingsPanel {
             auto_copy,
             autocomplete_enabled,
             suggestion_popup_enabled,
+            suggestion_popup_opacity,
+            suggestion_popup_opacity_slider,
             middle_click_paste,
             right_click_paste,
             paste_image_upload,
@@ -511,6 +552,23 @@ impl SettingsPanel {
 
     pub fn set_suggestion_popup_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.suggestion_popup_enabled = enabled;
+        cx.notify();
+    }
+
+    pub fn set_suggestion_popup_opacity(
+        &mut self,
+        opacity: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opacity = AppSettings::normalize_terminal_suggestion_popup_opacity(opacity);
+        if self.suggestion_popup_opacity == opacity {
+            return;
+        }
+        self.suggestion_popup_opacity = opacity;
+        self.suggestion_popup_opacity_slider.update(cx, |slider, cx| {
+            slider.set_value(opacity, window, cx);
+        });
         cx.notify();
     }
 
@@ -1103,6 +1161,9 @@ impl SettingsPanel {
         let auto_copy = self.auto_copy;
         let autocomplete_enabled = self.autocomplete_enabled;
         let suggestion_popup_enabled = self.suggestion_popup_enabled;
+        // 百分比读数直接取滑块 state：拖动中面板要跟手，写入设置则等松手。
+        let suggestion_popup_opacity_percent =
+            (self.suggestion_popup_opacity_slider.read(cx).value().start() * 100.0).round() as i32;
         let middle_click_paste = self.middle_click_paste;
         let right_click_paste = self.right_click_paste;
         let paste_image_upload = self.paste_image_upload;
@@ -1247,6 +1308,37 @@ impl SettingsPanel {
                                             *checked,
                                         ));
                                     })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .child(t!("Settings.suggestion_popup_opacity")),
+                                    )
+                                    .child(
+                                        div().text_xs().text_color(muted_fg).child(t!(
+                                            "Settings.suggestion_popup_opacity_value",
+                                            percent = suggestion_popup_opacity_percent
+                                        )),
+                                    ),
+                            )
+                            .child(
+                                Slider::new(&self.suggestion_popup_opacity_slider)
+                                    .w_full()
+                                    .disabled(!suggestion_popup_enabled),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child(t!("Settings.suggestion_popup_opacity_help")),
                             ),
                     )
                     .child(

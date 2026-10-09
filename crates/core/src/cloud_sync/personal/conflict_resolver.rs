@@ -30,9 +30,14 @@ where
         conflict: &PersonalSyncConflict,
         strategy: ConflictResolution,
     ) -> Result<(), SyncStoreError> {
+        // 冲突里存档的 `local_snapshot` 只是「检测到冲突那一刻」的快照：本地条目可能
+        // 已经被删掉（用户在界面里删了它），也可能换了一行。所以解决冲突前必须按
+        // `(data_type, 云端 record_id)` 现场重解析本地条目 —— 与 planner / worker
+        // 判定「本地是否有这条记录」的口径完全一致。
+        let local = self.current_local_item(conflict).await?;
         match strategy {
-            ConflictResolution::UseCloud => self.use_cloud(conflict).await?,
-            ConflictResolution::UseLocal => self.use_local(conflict).await?,
+            ConflictResolution::UseCloud => self.use_cloud(conflict, local.as_ref()).await?,
+            ConflictResolution::UseLocal => self.use_local(conflict, local.as_ref()).await?,
             ConflictResolution::KeepBoth => {
                 return Err(SyncStoreError::Conflict(
                     "personal sync keep-both resolution needs a local copy API".to_string(),
@@ -42,17 +47,36 @@ where
         self.clear_conflict(conflict)
     }
 
-    async fn use_cloud(&self, conflict: &PersonalSyncConflict) -> Result<(), SyncStoreError> {
+    /// 按云端记录现场找回本地条目；本地已不存在时返回 `None`。
+    async fn current_local_item(
+        &self,
+        conflict: &PersonalSyncConflict,
+    ) -> Result<Option<PersonalSyncItemSnapshot>, SyncStoreError> {
+        Ok(self
+            .local
+            .list_items()
+            .await?
+            .into_iter()
+            .find(|item| is_same_cloud_record(item, conflict)))
+    }
+
+    async fn use_cloud(
+        &self,
+        conflict: &PersonalSyncConflict,
+        local: Option<&PersonalSyncItemSnapshot>,
+    ) -> Result<(), SyncStoreError> {
         let remote = required_remote_snapshot(conflict)?;
-        let local = optional_local_snapshot(conflict)?;
         if remote.deleted_at.is_some() {
-            if let Some(local) = local.as_ref() {
+            // 云端也已经是墓碑：本地有就跟着删，没有就只剩清冲突。
+            if let Some(local) = local {
                 self.local.delete_item(local).await?;
             }
             return Ok(());
         }
-        self.local.apply_remote(&remote, local.as_ref()).await?;
-        if let Some(local) = local.as_ref() {
+        // 本地条目已不存在时 `apply_remote` 会走插入（远端胜出），这正是「使用远程版本」
+        // 应有的语义，以前因为硬解 `local_snapshot` 里的本地行 id 而直接报错。
+        self.local.apply_remote(&remote, local).await?;
+        if let Some(local) = local {
             self.local
                 .mark_synced(&local.local_id, &remote.id, remote.updated_at / 1000)
                 .await?;
@@ -60,10 +84,25 @@ where
         Ok(())
     }
 
-    async fn use_local(&self, conflict: &PersonalSyncConflict) -> Result<(), SyncStoreError> {
-        let local = required_local_snapshot(conflict)?;
+    async fn use_local(
+        &self,
+        conflict: &PersonalSyncConflict,
+        local: Option<&PersonalSyncItemSnapshot>,
+    ) -> Result<(), SyncStoreError> {
         let remote = required_remote_snapshot(conflict)?;
-        let mut record = self.local.export_item(&local).await?;
+        let Some(local) = local else {
+            // 本地条目已经不在了 ⇒「使用本地版本」= 保留本地的删除意图：把云端记录也
+            // 标记为删除。以前这里会直接报 "connection not found"，用户点哪个按钮都出不来。
+            return self
+                .store
+                .tombstone_record(
+                    &conflict.data_type,
+                    &conflict.record_id,
+                    Some(remote.version),
+                )
+                .await;
+        };
+        let mut record = self.local.export_item(local).await?;
         record.id = conflict.record_id.clone();
         let stored = self
             .store
@@ -85,20 +124,9 @@ where
     }
 }
 
-fn required_local_snapshot(
-    conflict: &PersonalSyncConflict,
-) -> Result<PersonalSyncItemSnapshot, SyncStoreError> {
-    parse_snapshot(conflict.local_snapshot.as_deref(), "local")
-}
-
-fn optional_local_snapshot(
-    conflict: &PersonalSyncConflict,
-) -> Result<Option<PersonalSyncItemSnapshot>, SyncStoreError> {
-    conflict
-        .local_snapshot
-        .as_deref()
-        .map(|snapshot| parse_snapshot(Some(snapshot), "local"))
-        .transpose()
+fn is_same_cloud_record(item: &PersonalSyncItemSnapshot, conflict: &PersonalSyncConflict) -> bool {
+    item.data_type == conflict.data_type
+        && item.cloud_id.as_deref() == Some(conflict.record_id.as_str())
 }
 
 fn required_remote_snapshot(

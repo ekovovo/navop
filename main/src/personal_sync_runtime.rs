@@ -18,7 +18,7 @@ use one_core::settings::{AppSettings, GlobalCurrentUser, PersonalSyncSettings, S
 use one_core::storage::traits::Repository;
 use one_core::storage::{
     ConnectionRepository, ConnectionType, CredentialRepository, CredentialSummary, DatabaseType,
-    GlobalStorageState, StoredConnection, Workspace, WorkspaceRepository,
+    GlobalStorageState, StorageManager, StoredConnection, Workspace, WorkspaceRepository,
 };
 
 use crate::personal_sync_status::PersonalSyncRuntimeStatus;
@@ -75,11 +75,10 @@ pub fn runtime_status(cx: &App) -> PersonalSyncRuntimeStatus {
 
 pub fn actions_enabled(cx: &App) -> bool {
     let settings = AppSettings::global(cx);
-    active_personal_sync_settings(settings)
-        .is_some_and(|settings| {
-            let password = webdav_password_for(&settings);
-            build_personal_sync_runtime_config(&settings, password.as_deref()).is_ok()
-        })
+    active_personal_sync_settings(settings).is_some_and(|settings| {
+        let password = webdav_password_for(&settings);
+        build_personal_sync_runtime_config(&settings, password.as_deref()).is_ok()
+    })
 }
 
 /// 取出 WebDAV 后端的明文密码。
@@ -682,24 +681,30 @@ pub(crate) fn personal_sync_event_from_connection_event(
         }
         ConnectionDataEvent::ConnectionDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::CONNECTION.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::WorkspaceDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::WORKSPACE.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::CredentialDeleted {
             cloud_id: Some(cloud_id),
+            last_synced_at,
             ..
         } => Some(PersonalSyncEvent::LocalDeleted {
             data_type: data_type::CREDENTIAL.to_string(),
             cloud_id: cloud_id.clone(),
+            last_synced_at: *last_synced_at,
         }),
         ConnectionDataEvent::ConnectionDeleted { cloud_id: None, .. }
         | ConnectionDataEvent::WorkspaceCreated { .. }
@@ -853,6 +858,26 @@ pub(crate) fn build_conflict_sink(cx: &App) -> Option<SqlitePersonalSyncConflict
 fn build_conflict_repository(cx: &App) -> Option<Arc<PersonalSyncConflictRepository>> {
     let storage = cx.try_global::<GlobalStorageState>()?.storage.clone();
     storage.get::<PersonalSyncConflictRepository>()
+}
+
+/// 本地条目被删除后，把它遗留的同步冲突一并清掉。
+///
+/// 冲突表的主键是 `(profile, data_type, 云端 record_id)`，但解析冲突要按云端 id
+/// 反查本地条目（`local.list_items()`）。本地条目消失后冲突就永远解不开 ——
+/// 两个按钮分别报 `connection not found` / `Connection N not found`；更糟的是点
+/// 「使用远程版本」还会把刚删掉的条目重新拉回本地。所以删除实体时必须一起清掉。
+pub(crate) fn forget_personal_conflict(storage: &StorageManager, data_type: &str, cloud_id: &str) {
+    let Some(conflicts) = storage.get::<PersonalSyncConflictRepository>() else {
+        return;
+    };
+    if let Err(error) = conflicts.delete("personal", data_type, cloud_id) {
+        tracing::warn!(
+            error = %error,
+            data_type,
+            cloud_id,
+            "Failed to forget personal sync conflict after local delete"
+        );
+    }
 }
 
 async fn resolve_personal_conflict_once(

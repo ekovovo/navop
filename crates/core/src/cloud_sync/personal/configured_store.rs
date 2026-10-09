@@ -55,9 +55,7 @@ where
     ) -> Result<Self, SyncStoreError> {
         match backend {
             PersonalSyncBackendKind::Folder => Ok(Self::Folder(DirectorySyncStore::new(root))),
-            PersonalSyncBackendKind::Git => {
-                Ok(Self::new_git(root, runner, git_auto_push))
-            }
+            PersonalSyncBackendKind::Git => Ok(Self::new_git(root, runner, git_auto_push)),
             PersonalSyncBackendKind::Webdav => {
                 let Some(settings) = webdav else {
                     return Err(SyncStoreError::NotConfigured);
@@ -166,6 +164,14 @@ where
             Self::Folder(store) => store.acquire_lock(owner).await,
             Self::Git(store) => store.acquire_lock(owner).await,
             Self::Webdav(store) => store.acquire_lock(owner).await,
+        }
+    }
+
+    async fn release_lock(&self, lock: &SyncStoreLock) -> Result<(), SyncStoreError> {
+        match self {
+            Self::Folder(store) => store.release_lock(lock).await,
+            Self::Git(store) => store.release_lock(lock).await,
+            Self::Webdav(store) => store.release_lock(lock).await,
         }
     }
 }

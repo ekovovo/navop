@@ -175,7 +175,12 @@ impl<V: Clone + 'static> ListDelegate for PickerDelegate<V> {
         self.selected_index = ix;
     }
 
-    fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+    fn confirm(
+        &mut self,
+        _secondary: bool,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) {
         let Some(ix) = self.selected_index else {
             return;
         };
@@ -315,7 +320,11 @@ impl RenderOnce for PickerItem {
                 )
             })
             .when(self.active, |el| {
-                el.child(Icon::new(IconName::Check).small().text_color(muted_foreground))
+                el.child(
+                    Icon::new(IconName::Check)
+                        .small()
+                        .text_color(muted_foreground),
+                )
             })
     }
 }

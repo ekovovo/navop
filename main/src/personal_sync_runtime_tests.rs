@@ -13,9 +13,10 @@ use one_core::storage::{DatabaseType, DbConnectionConfig, StoredConnection};
 use one_core::storage::{GlobalStorageState, StorageManager};
 
 use crate::personal_sync_runtime::{
-    actions_enabled, build_conflict_sink, list_personal_conflicts, personal_conflict_display_info,
-    personal_sync_event_from_connection_event, resolve_personal_conflict,
-    resolve_personal_conflicts, runtime_status, should_start_drain_after_enqueue,
+    actions_enabled, build_conflict_sink, forget_personal_conflict, list_personal_conflicts,
+    personal_conflict_display_info, personal_sync_event_from_connection_event,
+    resolve_personal_conflict, resolve_personal_conflicts, runtime_status,
+    should_start_drain_after_enqueue,
 };
 use crate::personal_sync_status::PersonalSyncRuntimeStatus;
 
@@ -102,10 +103,14 @@ fn personal_sync_maps_connection_delete_with_cloud_id_to_local_delete() {
         Some(PersonalSyncEvent::LocalDeleted {
             data_type: one_core::cloud_sync::data_type::CONNECTION.to_string(),
             cloud_id: "cloud-82".to_string(),
+            // 删除前那一行的同步基线必须原样带给 worker：它是判断「远端是否在本地
+            // 删除之后又被别的设备改过」的唯一依据。
+            last_synced_at: Some(1_700),
         }),
         personal_sync_event_from_connection_event(&ConnectionDataEvent::ConnectionDeleted {
             connection_id: 82,
             cloud_id: Some("cloud-82".to_string()),
+            last_synced_at: Some(1_700),
         })
     );
 }
@@ -116,10 +121,28 @@ fn personal_sync_maps_workspace_delete_with_cloud_id_to_local_delete() {
         Some(PersonalSyncEvent::LocalDeleted {
             data_type: one_core::cloud_sync::data_type::WORKSPACE.to_string(),
             cloud_id: "workspace-cloud-3".to_string(),
+            last_synced_at: None,
         }),
         personal_sync_event_from_connection_event(&ConnectionDataEvent::WorkspaceDeleted {
             workspace_id: 3,
             cloud_id: Some("workspace-cloud-3".to_string()),
+            last_synced_at: None,
+        })
+    );
+}
+
+#[test]
+fn personal_sync_maps_credential_delete_with_cloud_id_to_local_delete() {
+    assert_eq!(
+        Some(PersonalSyncEvent::LocalDeleted {
+            data_type: one_core::cloud_sync::data_type::CREDENTIAL.to_string(),
+            cloud_id: "credential-cloud-5".to_string(),
+            last_synced_at: Some(900),
+        }),
+        personal_sync_event_from_connection_event(&ConnectionDataEvent::CredentialDeleted {
+            credential_id: 5,
+            cloud_id: Some("credential-cloud-5".to_string()),
+            last_synced_at: Some(900),
         })
     );
 }
@@ -131,6 +154,7 @@ fn personal_sync_maps_deletes_without_cloud_id_and_workspace_changes_to_full_sca
         personal_sync_event_from_connection_event(&ConnectionDataEvent::ConnectionDeleted {
             connection_id: 82,
             cloud_id: None,
+            last_synced_at: Some(1_700),
         })
     );
     assert_eq!(
@@ -150,6 +174,7 @@ fn personal_sync_maps_deletes_without_cloud_id_and_workspace_changes_to_full_sca
         personal_sync_event_from_connection_event(&ConnectionDataEvent::WorkspaceDeleted {
             workspace_id: 3,
             cloud_id: None,
+            last_synced_at: None,
         })
     );
 }
@@ -237,6 +262,52 @@ fn personal_sync_lists_registered_conflicts(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn personal_sync_forgets_conflict_of_deleted_local_entity(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let conn = SqliteConnection::open(temp.path().join("test.db")).expect("sqlite");
+    conn.with_connection(|conn| run_migrations(conn))
+        .expect("migrations run");
+    let storage = StorageManager::new_with_connection(conn);
+
+    cx.update(|cx| {
+        cx.set_global(GlobalStorageState { storage });
+        one_core::storage::repository::init(cx);
+        let storage = cx.global::<GlobalStorageState>().storage.clone();
+        let repo = storage
+            .get::<PersonalSyncConflictRepository>()
+            .expect("conflict repository registered");
+        // 同一个云端 id 下的连接冲突与凭据冲突各一条，外加一条别的云端 id。
+        for data_type in [
+            one_core::cloud_sync::data_type::CONNECTION,
+            one_core::cloud_sync::data_type::CREDENTIAL,
+        ] {
+            repo.upsert(&stored_conflict(data_type, "shared-cloud-id"))
+                .expect("conflict stored");
+        }
+        repo.upsert(&stored_conflict(
+            one_core::cloud_sync::data_type::CONNECTION,
+            "other-cloud-id",
+        ))
+        .expect("conflict stored");
+
+        forget_personal_conflict(
+            &storage,
+            one_core::cloud_sync::data_type::CONNECTION,
+            "shared-cloud-id",
+        );
+
+        let remaining = list_personal_conflicts(cx).expect("conflicts list");
+        assert_eq!(2, remaining.len());
+        assert!(remaining.iter().any(|conflict| conflict.data_type
+            == one_core::cloud_sync::data_type::CREDENTIAL
+            && conflict.record_id == "shared-cloud-id"));
+        assert!(remaining.iter().any(|conflict| conflict.data_type
+            == one_core::cloud_sync::data_type::CONNECTION
+            && conflict.record_id == "other-cloud-id"));
+    });
+}
+
+#[gpui::test]
 fn personal_sync_conflict_display_reads_local_connection_summary(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().expect("tempdir");
     let conn = SqliteConnection::open(temp.path().join("test.db")).expect("sqlite");
@@ -300,6 +371,18 @@ fn test_connection(id: i64) -> StoredConnection {
     );
     connection.id = Some(id);
     connection
+}
+
+fn stored_conflict(data_type: &str, record_id: &str) -> PersonalSyncConflict {
+    PersonalSyncConflict {
+        backend_profile_id: "personal".to_string(),
+        record_id: record_id.to_string(),
+        data_type: data_type.to_string(),
+        conflict_type: PersonalConflictType::BothModified,
+        local_snapshot: Some("local".to_string()),
+        remote_snapshot: Some("remote".to_string()),
+        detected_at: 100,
+    }
 }
 
 fn personal_conflict_with_local_snapshot(local_id: i64) -> PersonalSyncConflict {
