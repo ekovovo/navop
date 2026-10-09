@@ -956,6 +956,61 @@ fn validate_chunk_len(offset: u64, total_size: u64, actual_len: usize) -> Result
     Ok(())
 }
 
+/// 把流水线分片读满。
+///
+/// SFTP 只要求服务端「最多」返回请求长度，**不保证一次读满**：短读是合法应答。
+/// 隧道/堡垒机/中继在压力下会真的只回一部分（issue #363：请求 61440 字节，
+/// 经 JumpServer 拿到 32768），此时整条下载不能就此失败——剩下的字节要在
+/// 同一个分片内、按已读到的偏移继续读，直到凑满 `expected_len`。
+/// 这样下游拿到的仍然是与 `validate_chunk_len` 约定一致的「长度恰好」分片，
+/// 流水线的连续写与进度累计都不用改。
+async fn read_chunk_fully<F, Fut>(offset: u64, expected_len: usize, mut read: F) -> Result<Vec<u8>>
+where
+    F: FnMut(u64, u32) -> Fut,
+    Fut: Future<Output = std::result::Result<Vec<u8>, SftpError>>,
+{
+    let mut buffer: Vec<u8> = Vec::with_capacity(expected_len);
+    while buffer.len() < expected_len {
+        let chunk_offset = offset + buffer.len() as u64;
+        let missing = expected_len - buffer.len();
+        let chunk = match read(chunk_offset, missing as u32).await {
+            Ok(chunk) => chunk,
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+                return Err(unexpected_eof_error(chunk_offset, missing));
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "SFTP read failed at offset {} ({} bytes): {}",
+                    chunk_offset,
+                    missing,
+                    error
+                ));
+            }
+        };
+        if chunk.len() > missing {
+            return Err(anyhow!(
+                "SFTP read at offset {} returned {} bytes for a {} byte request",
+                chunk_offset,
+                chunk.len(),
+                missing
+            ));
+        }
+        if chunk.is_empty() {
+            return Err(unexpected_eof_error(chunk_offset, missing));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
+}
+
+fn unexpected_eof_error(offset: u64, missing: usize) -> anyhow::Error {
+    anyhow!(
+        "Unexpected EOF while reading remote file at offset {}: expected {} more bytes",
+        offset,
+        missing
+    )
+}
+
 async fn abort_pipeline_reads<T: 'static>(reads: &mut JoinSet<T>) {
     reads.abort_all();
     while reads.join_next().await.is_some() {}
@@ -1540,30 +1595,22 @@ impl RusshSftpClient {
                 let raw = Arc::clone(&raw_session);
                 let handle = file_handle.clone();
                 reads.spawn(async move {
-                    match raw
-                        .read(handle, offset, expected_len as u32)
+                    // 短读（服务端只回一部分）在这里被续读补齐，而不是让整个
+                    // 下载失败；补齐后的分片长度必然等于 `expected_len`。
+                    let session = Arc::clone(&raw);
+                    let fetch = move |chunk_offset: u64, len: u32| {
+                        let session = Arc::clone(&session);
+                        let handle = handle.clone();
+                        async move {
+                            session
+                                .read(handle, chunk_offset, len)
+                                .await
+                                .map(|data| data.data)
+                        }
+                    };
+                    read_chunk_fully(offset, expected_len, fetch)
                         .await
-                    {
-                        Ok(data) => {
-                            validate_chunk_len(offset, total_size, data.data.len())?;
-                            Ok::<_, anyhow::Error>((offset, data.data))
-                        }
-                        Err(SftpError::Status(status))
-                            if status.status_code == StatusCode::Eof =>
-                        {
-                            Err(anyhow!(
-                                "Unexpected EOF while reading remote file at offset {}: expected {} bytes",
-                                offset,
-                                expected_len
-                            ))
-                        }
-                        Err(error) => Err(anyhow!(
-                            "SFTP read failed at offset {} ({} bytes): {}",
-                            offset,
-                            expected_len,
-                            error
-                        )),
-                    }
+                        .map(|data| (offset, data))
                 });
                 next_request += 1;
             }
@@ -3447,6 +3494,109 @@ mod tests {
         let out_of_range =
             expected_chunk_len(10, 10).expect_err("offset at EOF must not be scheduled");
         assert!(out_of_range.to_string().contains("out-of-range chunk"));
+    }
+
+    #[tokio::test]
+    async fn a_short_read_is_read_again_until_the_chunk_is_complete() {
+        let payload: Vec<u8> = (0..100u8).collect();
+        let requests = StdMutex::new(Vec::new());
+
+        let chunk = read_chunk_fully(0, payload.len(), |offset: u64, len: u32| {
+            requests.lock().expect("requests mutex").push((offset, len));
+            // 模拟中继：一次最多只回 32 字节 —— 这正是 issue #363 里
+            // 「请求 61440 字节、只拿到 32768」的形态。
+            let start = offset as usize;
+            let end = start + (len as usize).min(32);
+            let slice = payload[start..end].to_vec();
+            async move { Ok::<_, SftpError>(slice) }
+        })
+        .await
+        .expect("短读必须续读补齐，不能让整条下载失败");
+
+        assert_eq!(payload, chunk);
+        // 每个后续请求都从上一次拿到的位置接着要，缺口一路收窄。
+        assert_eq!(
+            vec![(0, 100), (32, 68), (64, 36), (96, 4)],
+            *requests.lock().expect("requests mutex")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_size_read_is_not_split_into_extra_requests() {
+        let payload: Vec<u8> = (0..100u8).collect();
+        let requests = StdMutex::new(Vec::new());
+
+        let chunk = read_chunk_fully(0, payload.len(), |offset: u64, len: u32| {
+            requests.lock().expect("requests mutex").push((offset, len));
+            let start = offset as usize;
+            let slice = payload[start..start + len as usize].to_vec();
+            async move { Ok::<_, SftpError>(slice) }
+        })
+        .await
+        .expect("读满的分片必须一次结束");
+
+        assert_eq!(payload, chunk);
+        assert_eq!(vec![(0, 100)], *requests.lock().expect("requests mutex"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_read_is_reported_as_eof_instead_of_looping() {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_chunk_fully(
+                4096,
+                PIPELINE_CHUNK_SIZE as usize,
+                |_offset: u64, _len: u32| async { Ok::<_, SftpError>(Vec::new()) },
+            ),
+        )
+        .await;
+
+        let error = outcome
+            .expect("空读必须立刻失败，不能一直续读下去")
+            .expect_err("空读代表远端提前结束");
+        assert!(
+            error
+                .to_string()
+                .contains("Unexpected EOF while reading remote file at offset 4096"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_eof_status_is_reported_as_eof() {
+        let error = read_chunk_fully(1024, 8, |_offset: u64, _len: u32| async {
+            Err::<Vec<u8>, _>(SftpError::Status(russh_sftp::protocol::Status {
+                id: 0,
+                status_code: StatusCode::Eof,
+                error_message: "eof".to_string(),
+                language_tag: "en".to_string(),
+            }))
+        })
+        .await
+        .expect_err("EOF 状态码要翻译成可读的 EOF 报错");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unexpected EOF while reading remote file at offset 1024"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_longer_than_requested_is_rejected() {
+        let error = read_chunk_fully(0, 8, |_offset: u64, _len: u32| async {
+            Ok::<_, SftpError>(vec![0u8; 9])
+        })
+        .await
+        .expect_err("返回超过请求长度的数据时必须报错，否则分片会错位");
+
+        assert!(
+            error
+                .to_string()
+                .contains("SFTP read at offset 0 returned 9 bytes for a 8 byte request"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
