@@ -263,6 +263,12 @@ pub struct EditTableState<D: EditTableDelegate> {
     right_clicked_row: Option<usize>,
     right_clicked_col: Option<usize>,
     selected_col: Option<usize>,
+    /// 「定位到某列」的标记列（`col_groups` 列坐标）。
+    ///
+    /// 与 `selected_col` 分开建模：选中列要给整列染色，而定位只要一个「在这儿」
+    /// 的提示。整列染色要按可见行数逐格绘制，列多、行多的时候滚动成本是线性的；
+    /// 标记只染表头一格。选中态一变化（点格、点头、键盘导航）即清除。
+    located_col: Option<usize>,
     selected_cell: Option<(usize, usize)>,
     resizing_col: Option<usize>,
 
@@ -339,6 +345,7 @@ where
             right_clicked_row: None,
             right_clicked_col: None,
             selected_col: None,
+            located_col: None,
             selected_cell: None,
             resizing_col: None,
             editing_cell: None,
@@ -564,11 +571,27 @@ where
         self.selected_col
     }
 
+    /// 定位标记当前指向的列（`col_groups` 列坐标）。
+    pub fn located_col(&self) -> Option<usize> {
+        self.located_col
+    }
+
+    /// 把某一列标成「刚定位到的列」，并保证它在视口里。
+    ///
+    /// 只改标记 + 滚动，不动选中态、不发事件：调用方（宿主视图）因此不会被
+    /// `SelectColumn` 之类的回调牵进去重绘，定位这一动作的绘制范围只有表头一格。
+    pub fn set_located_col(&mut self, col_ix: usize, cx: &mut Context<Self>) {
+        self.located_col = Some(col_ix);
+        self.ensure_col_visible(col_ix, cx);
+        cx.notify();
+    }
+
     pub fn set_selected_col(&mut self, col_ix: usize, cx: &mut Context<Self>) {
         self.selection_state = SelectionState::Column;
         self.selected_col = Some(col_ix);
         self.selected_row = None;
         self.selected_cell = None;
+        self.located_col = None;
         // 清除多选区，确保列选中和单元格选中互斥
         self.selection.clear();
         if let Some(col_ix) = self.selected_col {
@@ -583,6 +606,7 @@ where
         self.selected_row = None;
         self.selected_col = None;
         self.selected_cell = None;
+        self.located_col = None;
         // 同时清除多选区
         self.selection.clear();
         cx.notify();
@@ -890,6 +914,7 @@ where
         self.selected_cell = self.selection.active;
         self.selected_row = None;
         self.selected_col = None;
+        self.located_col = None;
 
         // 如果有活动单元格，滚动到可见
         if let Some((_, col_ix)) = self.selection.active {
@@ -1240,6 +1265,10 @@ where
     }
 
     fn prepare_col_groups(&mut self, cx: &mut Context<Self>) {
+        // 列组在这里整套重建（隐藏列、移动列、换页都会走到这儿），旧的列号
+        // 已经不指向同一字段了，留着标记就会染错表头。
+        self.located_col = None;
+
         let mut col_groups = Vec::new();
 
         if self.delegate.row_number_enabled(cx) {
@@ -2676,6 +2705,8 @@ where
 
         let is_editing = row_ix.is_some() && self.editing_cell == Some((row_ix.unwrap(), col_ix));
         let selection_border_color = cx.theme().table_active_border;
+        // 定位标记只染表头这一格，不染整列（见 `located_col` 字段注释）。
+        let is_located_header = row_ix.is_none() && self.located_col == Some(col_ix);
 
         let is_single_select_active =
             (is_active_cell || is_select_cell) && !is_editing && !is_multi_selection;
@@ -2705,6 +2736,8 @@ where
             .when(is_in_selection && !is_editing, |this| {
                 this.bg(cx.theme().table_active)
             })
+            // 定位标记：只给这一列的表头底色
+            .when(is_located_header, |this| this.bg(cx.theme().table_active))
             // 选区边框 - 上边界
             .when(border_top, |this| {
                 this.border_t_2().border_color(selection_border_color)

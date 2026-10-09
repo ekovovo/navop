@@ -2754,6 +2754,18 @@ TableDataGrid:
     en: (unnamed field)
     zh-CN: （未命名字段）
     zh-HK: （未命名欄位）
+  locate_column:
+    en: Locate field
+    zh-CN: 定位字段
+    zh-HK: 定位欄位
+  locate_column_hint:
+    en: Click a field to scroll it into view.
+    zh-CN: 点击字段即可把它带到眼前。
+    zh-HK: 點擊欄位即可帶到眼前。
+  locate_column_hidden:
+    en: hidden
+    zh-CN: 已隐藏
+    zh-HK: 已隱藏
   large_text_editor:
     en: Large Text Editor
     zh-CN: 大文本编辑器
