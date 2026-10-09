@@ -127,6 +127,8 @@ fn history_prompt_overlay_renders_max_height_and_scrollbar() {
 
     assert!(rules_source.contains("HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT"));
     assert!(rules_source.contains("content_height.min(px(HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT))"));
+    // 弹层背景必须走带透明度治理的 helper（issue #73），不允许渲染层直接裸用背景色。
+    assert!(render_source.contains("history_prompt_dropdown_background("));
     assert!(render_source.contains(".overflow_y_scroll()"));
     assert!(render_source.contains(".track_scroll(&self.history_prompt_scroll_handle)"));
     assert!(render_source.contains("scroll_to_item(index)"));

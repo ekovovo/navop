@@ -114,7 +114,11 @@ pub(super) const HISTORY_PROMPT_DROPDOWN_MAX_WIDTH: f32 = 500.0;
 /// 浮层高度上限：cd 补全可能一次返回上百个目录，必须封顶并滚动，
 /// 否则 origin 计算会被撑满终端整窗。
 pub(super) const HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT: f32 = 280.0;
-const HISTORY_PROMPT_DROPDOWN_BACKGROUND_OPACITY: f32 = 0.72;
+// 弹层背景画在终端内容之上，下层文字以 (1 - α) 的权重透进弹层。0.72（issue #5
+// 时代为「不遮挡终端内容」调低）会透出 28%，与弹层自身文字的对比度同量级，
+// 亮色主题下选中项几乎不可读（issue #73）。0.96 把透出压到 4%、文字恢复可读，
+// 同时保留一点下层内容的痕迹，不回到 #5 抱怨的完全遮挡观感。
+const HISTORY_PROMPT_DROPDOWN_BACKGROUND_OPACITY: f32 = 0.96;
 const HISTORY_PROMPT_ACTIVE_BACKGROUND_OPACITY: f32 = 0.32;
 const HISTORY_PROMPT_DROPDOWN_GAP_Y: f32 = 6.0;
 const HISTORY_PROMPT_DROPDOWN_EDGE_PADDING: f32 = 8.0;
@@ -206,15 +210,18 @@ mod tests {
     use gpui::{Hsla, px, rgb};
 
     #[test]
-    fn history_prompt_dropdown_applies_translucent_background() {
-        let background: Hsla = rgb(0x1E1E1E).into();
+    fn history_prompt_dropdown_background_limits_bleed_through_to_readable_levels() {
+        // issue #73：下层文字以 (1 - α) 的权重透进弹层。0.72 时代透出 28%，
+        // 与弹层自身文字的对比度同量级，亮色主题下几乎不可读；0.96 把透出压到
+        // 4%。不上调到 1.0：保留少量下层痕迹，不回到 issue #5 抱怨的完全遮挡。
+        let background: Hsla = rgb(0xFAFAFA).into();
 
         let dropdown = history_prompt_dropdown_background(background);
 
         assert_eq!(background.h, dropdown.h);
         assert_eq!(background.s, dropdown.s);
         assert_eq!(background.l, dropdown.l);
-        assert!((dropdown.a - 0.72).abs() < f32::EPSILON);
+        assert!((dropdown.a - 0.96).abs() < f32::EPSILON);
     }
 
     #[test]
