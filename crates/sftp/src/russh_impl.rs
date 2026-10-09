@@ -4240,3 +4240,7 @@ mod tests {
         assert_eq!(preserved.mtime, None);
     }
 }
+
+#[cfg(test)]
+#[path = "russh_impl_short_read_tests.rs"]
+mod short_read_tests;
