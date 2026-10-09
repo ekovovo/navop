@@ -666,6 +666,19 @@ fn can_paste_remote_file_clipboard(
     is_connected && clipboard.is_some_and(|clipboard| !clipboard.entries.is_empty())
 }
 
+/// 开关类工具栏图标的颜色。
+///
+/// 开关状态此前只用 `bg(hover)` 标出来，而 `hover` 本身就是「鼠标悬停」的颜色，
+/// 图标又始终是次要前景色：开着和关着几乎长得一样（issue #359）。开启时改用
+/// 强调色，关闭时退回次要前景色，用户扫一眼就能分辨。
+fn toggle_icon_color(enabled: bool, colors: &TerminalColors) -> Hsla {
+    if enabled {
+        colors.accent
+    } else {
+        colors.muted_foreground
+    }
+}
+
 /// 文件管理器面板事件
 #[derive(Clone, Debug)]
 pub enum FileManagerPanelEvent {
@@ -1881,6 +1894,24 @@ impl FileManagerPanel {
     /// 目录跟随是否真正生效：宿主设置里开着跟随，且面板仍在终端那台机器上。
     fn terminal_follow_active(&self) -> bool {
         self.follow_terminal_cwd && !self.is_foreign_target()
+    }
+
+    /// 工具栏「定位到终端目录」是否可用。
+    ///
+    /// 与目录跟随同一条约束：面板必须还在终端那台机器上，否则把本面板的路径
+    /// `cd` 到终端只会切到一台没有该路径的机器。未连接时也没有可用的当前目录。
+    fn can_locate_in_terminal(&self) -> bool {
+        self.connection_state == ConnectionState::Connected && !self.is_foreign_target()
+    }
+
+    /// 「定位到终端目录」要推给终端的路径：面板当前目录（面板 → 终端，方向与
+    /// [`FileManagerPanelEvent::SyncWorkingDir`] 相反）。
+    ///
+    /// `None` 既表示按钮不可用，也表示点击不该发出事件——把「能不能点」和
+    /// 「点了推什么」放在同一处决定，避免两者漂移。
+    fn locate_in_terminal_target(&self) -> Option<String> {
+        self.can_locate_in_terminal()
+            .then(|| self.current_path.clone())
     }
 
     /// 面板当前浏览目标的显示名。
@@ -4522,6 +4553,7 @@ impl FileManagerPanel {
                     // 自动跟随终端工作目录开关
                     .child({
                         let follow_terminal_cwd = self.follow_terminal_cwd;
+                        let toggle_color = toggle_icon_color(follow_terminal_cwd, &self.colors);
                         div()
                             .id("fm-follow-terminal")
                             .cursor_pointer()
@@ -4546,7 +4578,7 @@ impl FileManagerPanel {
                             .child(
                                 Icon::new(IconName::LocateActiveTab)
                                     .small()
-                                    .text_color(muted_foreground),
+                                    .text_color(toggle_color),
                             )
                     })
                     // 同步终端工作目录按钮
@@ -4573,6 +4605,38 @@ impl FileManagerPanel {
                                     .text_color(muted_foreground),
                             ),
                     )
+                    // 定位到终端目录按钮（当前面板目录 → 终端 cd）
+                    //
+                    // 与上面的「同步终端目录」互为反方向：那个把终端的 cwd 拉到面板，
+                    // 这个把面板当前目录推给终端（issue #359）。
+                    .child({
+                        let locate_target = self.locate_in_terminal_target();
+                        let clickable = locate_target.is_some();
+                        div()
+                            .id("fm-locate-terminal")
+                            .cursor_pointer()
+                            .rounded_md()
+                            .p(px(5.))
+                            .when(!clickable, |el| el.opacity(0.4))
+                            .when(clickable, |el| el.hover(move |s| s.bg(hover)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_this, _, _window, cx| {
+                                    if let Some(path) = locate_target.clone() {
+                                        cx.emit(FileManagerPanelEvent::CdToTerminal(path));
+                                    }
+                                }),
+                            )
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(t!("FileManager.locate_terminal_dir").to_string())
+                                    .build(window, cx)
+                            })
+                            .child(
+                                Icon::new(IconName::SquareTerminal)
+                                    .small()
+                                    .text_color(muted_foreground),
+                            )
+                    })
                     // 刷新按钮
                     .child(
                         div()
@@ -4598,14 +4662,16 @@ impl FileManagerPanel {
                             ),
                     )
                     // 隐藏文件开关
-                    .child(
+                    .child({
+                        let show_hidden = self.show_hidden;
+                        let toggle_color = toggle_icon_color(show_hidden, &self.colors);
                         div()
                             .id("fm-hidden")
                             .cursor_pointer()
                             .rounded_md()
                             .p(px(5.))
                             .hover(move |s| s.bg(hover))
-                            .when(self.show_hidden, |el| el.bg(hover))
+                            .when(show_hidden, |el| el.bg(hover))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _window, cx| {
@@ -4619,12 +4685,8 @@ impl FileManagerPanel {
                                 Tooltip::new(t!("FileManager.toggle_hidden").to_string())
                                     .build(window, cx)
                             })
-                            .child(
-                                Icon::new(IconName::Eye)
-                                    .small()
-                                    .text_color(muted_foreground),
-                            ),
-                    )
+                            .child(Icon::new(IconName::Eye).small().text_color(toggle_color))
+                    })
                     .child(self.render_frame_options_button(cx))
                     // 关闭按钮
                     .child(
@@ -6158,13 +6220,13 @@ mod tests {
     use super::{
         ConnectionState, FileConflictChoice, NavigationRecoveryPlan, PendingUpload,
         RemoteClipboardEntry, RemoteClipboardKind, RemoteFileClipboard, ReportedHostDecision,
-        ReportedHostTracker, ReportedWorkingDir, SharedProgress, TransferCancelTarget,
-        TransferOperation, TransferQueue, TransferTask, TransferTaskState,
+        ReportedHostTracker, ReportedWorkingDir, SharedProgress, TerminalColors,
+        TransferCancelTarget, TransferOperation, TransferQueue, TransferTask, TransferTaskState,
         build_navigation_recovery_plan, build_retry_reset_plan, can_paste_remote_file_clipboard,
         classify_reported_host, clear_remote_listing_state, frame_move_options,
         global_transfer_action, is_file_browsable_connection, resolve_upload_conflict,
         should_apply_directory_result, should_refresh_after_delete, should_refresh_after_upload,
-        transfer_progress_display_label,
+        toggle_icon_color, transfer_progress_display_label,
     };
     use crate::transfer_notice::TransferAction;
     use anyhow::{Result, anyhow};
@@ -7184,14 +7246,28 @@ mod tests {
         assert_eq!(Some(4), queue.next_startable().map(|task| task.id));
     }
 
+    /// 取出 `render_toolbar` 的函数体，供工具栏的源码级断言使用。
+    ///
+    /// 不能用 `source.split("fn render_toolbar").nth(1).split("fn render_path_breadcrumb")`
+    /// 这种写法：`render_path_breadcrumb` 定义在 `render_toolbar` **之前**，
+    /// `split(...).next()` 在找不到分隔符时返回的是**整段剩余源码**——切片会一路
+    /// 延伸到文件末尾，于是右键菜单里的同名事件、甚至测试自身的字面量都能满足断言
+    /// （断言空转）。这里按「下一个同级 `fn`」收口。
+    fn toolbar_source() -> &'static str {
+        let source = include_str!("file_manager_panel.rs");
+        let start = source
+            .find("fn render_toolbar")
+            .expect("render_toolbar 定义");
+        let rest = &source[start..];
+        let end = rest
+            .find("\n    fn ")
+            .expect("render_toolbar 之后的同级函数");
+        &rest[..end]
+    }
+
     #[test]
     fn toolbar_exposes_open_sftp_tab_action() {
-        let source = include_str!("file_manager_panel.rs");
-        let toolbar = source
-            .split("fn render_toolbar")
-            .nth(1)
-            .and_then(|source| source.split("fn render_path_breadcrumb").next())
-            .expect("file manager toolbar source");
+        let toolbar = toolbar_source();
 
         assert!(toolbar.contains(r#".id("fm-open-sftp")"#));
         assert!(toolbar.contains("FileManagerPanelEvent::OpenSftp("));
@@ -7202,17 +7278,156 @@ mod tests {
 
     #[test]
     fn toolbar_exposes_follow_terminal_cwd_toggle() {
-        let source = include_str!("file_manager_panel.rs");
-        let toolbar = source
-            .split("fn render_toolbar")
-            .nth(1)
-            .and_then(|source| source.split("fn render_path_breadcrumb").next())
-            .expect("file manager toolbar source");
+        let toolbar = toolbar_source();
 
         assert!(toolbar.contains(r#".id("fm-follow-terminal")"#));
         assert!(toolbar.contains("FileManagerPanelEvent::ToggleFollowTerminalCwd"));
         assert!(toolbar.contains(r#""FileManager.follow_terminal_dir_on""#));
         assert!(toolbar.contains(r#""FileManager.follow_terminal_dir_off""#));
+    }
+
+    /// issue #359：工具栏上「同步终端目录」（终端 → 面板）已经有按钮，反方向
+    /// 「定位到终端目录」（面板 → 终端）此前只能在目录行右键里找到，太深。
+    #[test]
+    fn toolbar_exposes_locate_in_terminal_action() {
+        let toolbar = toolbar_source();
+        let block = toolbar
+            .split("// 定位到终端目录按钮")
+            .nth(1)
+            .and_then(|block| block.split("// 刷新按钮").next())
+            .expect("「定位到终端目录」按钮块");
+
+        assert!(block.contains(r#".id("fm-locate-terminal")"#));
+        assert!(block.contains("FileManagerPanelEvent::CdToTerminal("));
+        assert!(block.contains(r#"t!("FileManager.locate_terminal_dir")"#));
+        assert!(block.contains("self.locate_in_terminal_target()"));
+
+        // 已有方向必须还在：两个按钮互为反向，缺一就成了单向同步。
+        let sync = toolbar
+            .split("// 同步终端工作目录按钮")
+            .nth(1)
+            .and_then(|sync| sync.split("// 定位到终端目录按钮").next())
+            .expect("「同步终端工作目录」按钮块");
+        assert!(sync.contains(r#".id("fm-sync-terminal")"#));
+        assert!(sync.contains("FileManagerPanelEvent::SyncWorkingDir"));
+    }
+
+    /// issue #359：两个开关此前只用 `bg(hover)` 标态——而 `hover` 正是鼠标悬停色，
+    /// 开着和关着看起来一样。图标颜色必须跟着状态走。
+    #[test]
+    fn toolbar_toggles_signal_state_with_distinct_icon_colors() {
+        let toolbar = toolbar_source();
+
+        for (label, expected_call, block) in [
+            (
+                "自动跟随终端工作目录开关",
+                "toggle_icon_color(follow_terminal_cwd, &self.colors)",
+                toolbar
+                    .split(r#"// 自动跟随终端工作目录开关"#)
+                    .nth(1)
+                    .and_then(|s| s.split(r#".id("fm-sync-terminal")"#).next())
+                    .expect("follow-terminal toggle block"),
+            ),
+            (
+                "隐藏文件开关",
+                "toggle_icon_color(show_hidden, &self.colors)",
+                toolbar
+                    .split(r#"// 隐藏文件开关"#)
+                    .nth(1)
+                    .and_then(|s| s.split("render_frame_options_button").next())
+                    .expect("hidden-files toggle block"),
+            ),
+        ] {
+            assert!(
+                block.contains(expected_call),
+                "{label}的图标颜色必须跟着自己的开关状态走（期望 {expected_call}）"
+            );
+            assert!(
+                !block.contains("text_color(muted_foreground)"),
+                "{label}不能把图标写死成次要前景色，否则开/关同色"
+            );
+        }
+    }
+
+    #[test]
+    fn toggle_icon_color_separates_on_from_off() {
+        let colors = TerminalColors {
+            background: gpui::black(),
+            foreground: gpui::white(),
+            muted: gpui::black(),
+            muted_foreground: gpui::white(),
+            border: gpui::black(),
+            accent: gpui::red(),
+            accent_foreground: gpui::white(),
+        };
+
+        assert_eq!(toggle_icon_color(true, &colors), gpui::red());
+        assert_eq!(toggle_icon_color(false, &colors), gpui::white());
+        assert_ne!(
+            toggle_icon_color(true, &colors),
+            toggle_icon_color(false, &colors),
+            "开关的开/关必须给出两种不同的图标颜色"
+        );
+    }
+
+    /// 「定位到终端目录」的两条前置条件：面板仍绑在终端那台机器上，且已连接。
+    ///
+    /// 断言的是 payload 而不是布尔值：按钮点下去要 `cd` 到**面板当前目录**，
+    /// 只测「能点/不能点」会漏掉「推错了路径」。
+    #[gpui::test]
+    async fn locate_in_terminal_needs_the_terminal_host_and_a_live_connection(
+        mut cx: &mut TestAppContext,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let (_provider, _executor, panel, _window) = file_manager_fixture(&mut cx, &temp_dir);
+
+        // 已连接且就在终端那台机器上：可用，推的是面板当前目录。
+        panel.update(cx, |panel, cx| {
+            panel.connection_state = ConnectionState::Connected;
+            cx.notify();
+        });
+        let current_path = panel.read_with(cx, |panel, _| panel.current_path.clone());
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.locate_in_terminal_target()),
+            Some(current_path)
+        );
+
+        // 切到另一台机器：即使连着，也不能拿本面板的路径去 cd 终端。
+        panel.update(cx, |panel, cx| {
+            panel.switch_target(test_other_host_connection(), cx)
+        });
+        panel.update(cx, |panel, cx| {
+            panel.connection_state = ConnectionState::Connected;
+            cx.notify();
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.locate_in_terminal_target()),
+            None
+        );
+
+        // 切回终端那台机器：恢复可用，推的是切回来之后的新当前目录。
+        panel.update(cx, |panel, cx| {
+            panel.switch_target(test_stored_connection(), cx)
+        });
+        panel.update(cx, |panel, cx| {
+            panel.connection_state = ConnectionState::Connected;
+            cx.notify();
+        });
+        let current_path = panel.read_with(cx, |panel, _| panel.current_path.clone());
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.locate_in_terminal_target()),
+            Some(current_path)
+        );
+
+        // 断连：没有可用的当前目录。
+        panel.update(cx, |panel, cx| {
+            panel.connection_state = ConnectionState::Idle;
+            cx.notify();
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.locate_in_terminal_target()),
+            None
+        );
     }
 
     #[test]

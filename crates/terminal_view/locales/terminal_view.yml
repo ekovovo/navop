@@ -2312,6 +2312,10 @@ FileManager:
     en: Sync Terminal Directory
     zh-CN: 同步终端目录
     zh-HK: 同步終端目錄
+  locate_terminal_dir:
+    en: Locate Current Directory in Terminal
+    zh-CN: 定位到终端目录
+    zh-HK: 定位到終端目錄
   follow_terminal_dir_on:
     en: "Following terminal directory: on. Click to stop auto-following."
     zh-CN: "已跟随终端目录：开启。点击可停止自动跟随。"
