@@ -118,6 +118,22 @@ impl PublicMcpApprover for FixedApprover {
     }
 }
 
+/// 注册一个 SSH 会话，同时挂上 remote ops，供工具清单/调用用例复用。
+fn registry_with_remote_ops(executed_commands: Arc<Mutex<Vec<String>>>) -> PublicMcpRegistry {
+    let registry = PublicMcpRegistry::default();
+    let session = FakeRemoteSession { executed_commands };
+    registry.register(session.clone());
+    registry.register_remote_ops(session);
+    registry
+}
+
+fn tool_names(tools: &[Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect()
+}
+
 #[tokio::test]
 async fn tools_call_rejects_ssh_list_sessions() {
     let registry = PublicMcpRegistry::default();
@@ -202,6 +218,79 @@ async fn tools_call_rejects_untyped_remote_tool_names() {
             .as_str()
             .unwrap_or_default()
             .contains("unknown public MCP tool")
+    );
+}
+
+#[tokio::test]
+async fn tools_list_only_advertises_function_calling_safe_names() {
+    let registry = registry_with_remote_ops(Arc::new(Mutex::new(Vec::new())));
+    let mut client = TestClient::connect(registry, PermissionMode::Allow).await;
+
+    let response = client
+        .request(json!({
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .await;
+
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools/list should return a tool array");
+    let names = tool_names(tools);
+
+    // 内部 id 是 `ssh.command.poll` 这样的分层名字，线上必须已经净化。
+    assert!(
+        names.contains(&"ssh_exec".to_string()),
+        "dotted tool ids must be sanitized on the wire, got {names:?}"
+    );
+    assert!(
+        names.contains(&"ssh_command_poll".to_string()),
+        "dotted tool ids must be sanitized on the wire, got {names:?}"
+    );
+
+    // Grok 在注册函数时只接受字母/数字/`_`/`-`，其余名字会被整批丢弃（issue #194）。
+    let unfriendly: Vec<&String> = names
+        .iter()
+        .filter(|name| {
+            !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        })
+        .collect();
+    assert!(
+        unfriendly.is_empty(),
+        "these names would be dropped by Grok: {unfriendly:?}"
+    );
+}
+
+#[tokio::test]
+async fn tools_call_accepts_the_sanitized_tool_name() {
+    let executed_commands = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with_remote_ops(executed_commands.clone());
+    let mut client = TestClient::connect(registry, PermissionMode::Allow).await;
+
+    let response = client
+        .request(json!({
+            "jsonrpc": "2.0",
+            "id": 41,
+            "method": "tools/call",
+            "params": {
+                "name": "ssh_exec",
+                "arguments": {
+                    "target": "ssh-1",
+                    "command": "pwd"
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(0, response["result"]["structuredContent"]["exit_code"]);
+    assert_eq!(
+        vec!["pwd".to_string()],
+        *executed_commands.lock().unwrap(),
+        "the sanitized name must resolve back to ssh.exec"
     );
 }
 
