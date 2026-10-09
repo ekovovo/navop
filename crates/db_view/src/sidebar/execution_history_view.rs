@@ -1,5 +1,8 @@
 use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, IntoElement, ParentElement, Render, Styled, Window, div, px,
+    uniform_list,
+};
 use gpui_component::{
     ActiveTheme, Icon, Sizable, Size,
     button::{Button, ButtonVariants},
@@ -12,16 +15,51 @@ use gpui_component::{
 use one_assets::IconName;
 use one_ui::IconButton;
 use rust_i18n::t;
+use std::ops::Range;
 
 use super::execution_history::{ExecutionRecord, ExecutionStatus};
 use super::execution_history_panel::{ExecutionHistoryFilter, ExecutionHistoryPanel};
 
+/// 记录触发行（一条记录占的可点区域）的高度。
+const EXECUTION_RECORD_BUTTON_HEIGHT: f32 = 88.;
+/// 记录之间的间距。
+const EXECUTION_RECORD_ROW_GAP: f32 = 8.;
+/// `uniform_list` 的固定行高。
+///
+/// 它要求所有行等高，又不支持 item 间距，所以记录之间的间隔只能并进行高里；
+/// 行高与实际按钮高度对不上会把列表压成一条（issue #368）。
+const EXECUTION_RECORD_ROW_HEIGHT: f32 = EXECUTION_RECORD_BUTTON_HEIGHT + EXECUTION_RECORD_ROW_GAP;
+
+/// 可见记录在 `history.records()` 里的原始下标，按「新 → 旧」排列。
+///
+/// 返回下标而不是记录本身：列表只渲染可见的十来行，回查远比克隆便宜 ——
+/// `ExecutionRecord` 的 `sql` / `details` 都是字符串，旧实现每条都
+/// `record.clone()`、还全量建元素，两者一起构成了 issue #368 里「每敲一个字
+/// 卡一下」的开销。
+pub(super) fn visible_record_indices(
+    records: &[ExecutionRecord],
+    filter: ExecutionHistoryFilter,
+) -> Vec<usize> {
+    records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| filter.matches(record))
+        .map(|(index, _)| index)
+        .rev()
+        .collect()
+}
+
 impl ExecutionHistoryPanel {
+    /// 渲染一条记录。
+    ///
+    /// 返回 `AnyElement` 而不是 `impl IntoElement`：`uniform_list` 的渲染回调
+    /// 只能返回一个固定类型，带生命周期的 opaque 类型会让每个可见行各自
+    /// 实例化一个 `R`，编译不过。
     fn render_record(
         index: usize,
         record: &ExecutionRecord,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let (status_color, status_icon) = match record.status {
             ExecutionStatus::Success => (cx.theme().success, IconName::CircleCheck),
             ExecutionStatus::Error => (cx.theme().danger, IconName::TriangleAlert),
@@ -35,12 +73,12 @@ impl ExecutionHistoryPanel {
             .to_string();
         let popover_record = record.clone();
 
-        Popover::new(("database-execution-history-record", index))
+        let popover = Popover::new(("database-execution-history-record", index))
             .trigger(
                 Button::new(("database-execution-history-trigger", index))
                     .ghost()
                     .w_full()
-                    .h(px(88.))
+                    .h(px(EXECUTION_RECORD_BUTTON_HEIGHT))
                     .p_2()
                     .child(
                         v_flex()
@@ -80,7 +118,13 @@ impl ExecutionHistoryPanel {
                     ),
             )
             .content(move |_state, _window, cx| Self::render_details(index, &popover_record, cx))
-            .max_w(px(680.))
+            .max_w(px(680.));
+
+        // 固定行高是 `uniform_list` 虚拟化的前提：行间距并进来，再加按钮就撑满了。
+        div()
+            .h(px(EXECUTION_RECORD_ROW_HEIGHT))
+            .child(popover)
+            .into_any_element()
     }
 
     fn render_metadata(record: &ExecutionRecord, cx: &App) -> AnyElement {
@@ -244,20 +288,37 @@ impl Render for ExecutionHistoryPanel {
             .filter(|record| record.status == ExecutionStatus::Success)
             .count();
         let error_count = count - success_count;
-        let records = self
-            .history
-            .records()
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| match self.filter {
-                ExecutionHistoryFilter::All => true,
-                ExecutionHistoryFilter::Success => record.status == ExecutionStatus::Success,
-                ExecutionHistoryFilter::Error => record.status == ExecutionStatus::Error,
-            })
-            .rev()
-            .map(|(index, record)| Self::render_record(index, record, cx).into_any_element())
-            .collect::<Vec<AnyElement>>();
-        let visible_count = records.len();
+        // 只算「可见记录在 records() 里的原始下标」，交给 `uniform_list` 按需渲染。
+        // 旧实现把最多 1000 条记录（每条一个 `Popover`）全量铺进 element 树，
+        // 打开面板后 SQL 编辑器每敲一个字都要重建上万个元素（issue #368）。
+        let visible_indices = visible_record_indices(self.history.records(), self.filter);
+        let visible_count = visible_indices.len();
+        let list = if visible_count == 0 {
+            div()
+                .p_3()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(t!("DatabaseSidebar.no_execution_history").to_string())
+                .into_any_element()
+        } else {
+            uniform_list(
+                "database-execution-history-list",
+                visible_count,
+                cx.processor(
+                    move |panel: &mut Self, range: Range<usize>, _window, cx| {
+                        range
+                            .filter_map(|row_ix| {
+                                let record_ix = visible_indices.get(row_ix).copied()?;
+                                let record = panel.history.records().get(record_ix)?;
+                                Some(Self::render_record(record_ix, record, cx))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                ),
+            )
+            .size_full()
+            .into_any_element()
+        };
 
         v_flex()
             .size_full()
@@ -323,22 +384,13 @@ impl Render for ExecutionHistoryPanel {
             )
             .child(
                 div().flex_1().h_full().min_h_0().overflow_hidden().child(
-                    v_flex()
-                        .size_full()
-                        .gap_2()
-                        .p_2()
-                        .overflow_y_scrollbar()
-                        .when(visible_count == 0, |this| {
-                            this.child(
-                                div()
-                                    .p_3()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(t!("DatabaseSidebar.no_execution_history").to_string()),
-                            )
-                        })
-                        .children(records),
+                    // 保留原来的 8px 内边距；滚动交给 `uniform_list` 自己。
+                    div().size_full().min_h_0().min_w_0().p_2().child(list),
                 ),
             )
     }
 }
+
+#[cfg(test)]
+#[path = "execution_history_view_tests.rs"]
+mod tests;
