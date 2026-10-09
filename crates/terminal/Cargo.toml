@@ -33,6 +33,10 @@ uuid = { workspace = true }
 tempfile = "3"
 polling = "3.11.0"
 
+[dev-dependencies]
+# SSH 连接建立路径的测试用暂停时钟验证退化重连的退避，不真实等待。
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

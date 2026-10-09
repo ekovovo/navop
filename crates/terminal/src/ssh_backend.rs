@@ -40,6 +40,14 @@ use crate::{
 
 /// Shell 类型探测只用于确认运行时注入是否安全，不会写入远端文件。
 const SHELL_INTEGRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// 退化重连（跳过探测、只开一个裸交互 channel）前依次等待的退避时长。
+///
+/// 受限设备（防火墙/交换机等）掐断传输层后不会立刻回收自己那边的会话记录，
+/// 紧接着的重连往往被同一原因再掐一次，表现为「首次连接报 Disconnected、
+/// 隔几秒手动重连才成功」。因此退化重连必须退避，最多重试
+/// `DEGRADED_RECONNECT_BACKOFFS.len()` 次，用一次连接尝试的时间换掉
+/// 用户手动重连。
+const DEGRADED_RECONNECT_BACKOFFS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 /// 运行时注入必须快速完成；超时后中断内部命令并降级为裸终端。
 const SHELL_INTEGRATION_RUNTIME_TIMEOUT: Duration = Duration::from_secs(5);
 /// 就绪握手（等待首个输出 / 注入回显 / 首个 OSC 133;B）的看门狗。
@@ -203,9 +211,11 @@ fn add_connect_error_context(err: anyhow::Error) -> anyhow::Error {
     if is_transport_disconnect_failure(&err) {
         return err.context(
             "the remote device dropped the SSH transport while a session channel was \
-             being opened; embedded/network devices (firewalls, switches) often allow \
-             only a limited number of concurrent sessions — check the device's SSH/VTY \
-             session settings",
+             being opened; embedded/network devices (firewalls, switches) commonly allow \
+             only one session channel per transport, and may keep the previous session \
+             registered for a while after dropping it — retry in a few seconds, or enable \
+             \"Disable Shell Integration\" for this connection if it keeps failing; \
+             otherwise check the device's SSH/VTY concurrent-session limits",
         );
     }
 
@@ -1433,8 +1443,8 @@ impl SshBackend {
         })
     }
 
-    /// 获取一个 interactive channel，封装了"channel open 失败时失效当前 transport generation
-    /// 并重试一次"的重连逻辑。
+    /// 获取一个 interactive channel，封装了"channel open 失败时失效当前 transport
+    /// generation，退避后以单个裸交互 channel 重连"的有界重试逻辑。
     /// Shell integration 通过运行时注入生效，这里只返回"是否请求了集成"。
     async fn establish_channel(
         session_manager: &Arc<SshSessionManager>,
@@ -1514,26 +1524,27 @@ impl SshBackend {
                     return Ok((client, channel, shell_integration_requested));
                 }
                 Err(err)
-                    if attempt == 0
+                    if attempt < DEGRADED_RECONNECT_BACKOFFS.len()
                         && (probe_killed_transport
                             || is_channel_open_failure(&err)
                             || is_transport_disconnect_failure(&err)) =>
                 {
-                    if !probe_killed_transport {
-                        tracing::warn!(
-                            target: "terminal.ssh.connect",
-                            error = %err,
-                            "SSH session channel 建立失败，重建连接并降级为单个裸交互 channel"
-                        );
-                    }
                     let invalidated = session_manager.invalidate_client(&client).await;
-                    tracing::debug!(
-                        target: "terminal.ssh.connect",
-                        invalidated,
-                        "已报告被拒绝 channel 所属的 SSH transport generation"
-                    );
+                    let backoff = DEGRADED_RECONNECT_BACKOFFS[attempt];
                     attempt += 1;
                     plain_channel_only = true;
+                    tracing::warn!(
+                        target: "terminal.ssh.connect",
+                        attempt,
+                        invalidated,
+                        probe_killed_transport,
+                        backoff = ?backoff,
+                        error = %err,
+                        "SSH session channel 建立失败，退避后以单个裸交互 channel 重连（跳过 shell integration 探测）"
+                    );
+                    // 设备侧旧会话可能还没回收：等一小段再重连，否则重连会被同一原因
+                    // 再掐一次，最终把错误抛给用户（Issue #183 的残留场景）。
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -2360,7 +2371,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn establish_channel_reconnects_with_one_plain_channel_after_russh_open_failure() {
         let (probe_channel, probe_state) = MockChannel::new(
             [
@@ -2409,7 +2420,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn establish_channel_reconnects_when_interactive_open_reports_disconnect() {
         // 设备在探测通道之后才把传输层捆断：`is_connected()` 可能还没更新（用
         // `new_with_open_error` 而非 `new_disconnected_on_open_error`），于是探测只降级，
@@ -2458,7 +2469,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn establish_channel_reconnects_with_one_plain_channel_when_probe_kills_transport() {
         // 模拟华为 USG 等受限设备：探测通道 open 直接被设备回
         // SSH_MSG_DISCONNECT，传输层被一起掐断。
@@ -2494,7 +2505,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn establish_channel_reconnects_when_probe_execution_drops_transport() {
         // 模拟探测 exec 执行期间设备掐断传输层：探测本身"成功"返回，
         // 但传输层已死，交互通道不能再在原 transport 上打开。
@@ -2540,7 +2551,77 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn establish_channel_retries_degraded_channel_until_device_releases_session() {
+        // 受限设备掐断传输层后不会立刻回收自己那边的会话记录：探测和紧接着的
+        // 立即重连都被同一原因掐断，只有退避后的那次重试才拿到交互 channel。
+        let first_client = MockClient::new_disconnected_on_open_error([], "Disconnected");
+        let second_client = MockClient::new_disconnected_on_open_error([], "Disconnected");
+        let (interactive_channel, interactive_state) = MockChannel::new([], false);
+        let third_client = MockClient::new([interactive_channel]);
+        let manager = MockSessionManager::new([first_client, second_client, third_client]);
+
+        let (_client, _channel, shell_integration_requested) =
+            SshBackend::establish_channel_with_manager(
+                &manager,
+                &PtyConfig::default(),
+                Some(42),
+                false,
+            )
+            .await
+            .expect("退避重试应在设备回收旧会话后建立交互通道");
+
+        assert!(!shell_integration_requested);
+        assert_eq!(
+            manager.invalidation_count(),
+            2,
+            "被掐断的 transport generation 每次都要失效，不能复用死 transport"
+        );
+        assert_eq!(
+            recorded_ops(&interactive_state),
+            vec![ChannelOp::RequestPty, ChannelOp::RequestShell],
+            "退化重连只开一个交互 channel，不再探测"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn establish_channel_reports_disconnect_after_degraded_retries_are_exhausted() {
+        // 重试预算有界：设备始终回收不了旧会话时要如实报错（带可诊断上下文），
+        // 不能无限重连把用户挂在「连接中」。
+        let manager = MockSessionManager::new([
+            MockClient::new_disconnected_on_open_error([], "Disconnected"),
+            MockClient::new_disconnected_on_open_error([], "Disconnected"),
+            MockClient::new_disconnected_on_open_error([], "Disconnected"),
+        ]);
+
+        let result = SshBackend::establish_channel_with_manager(
+            &manager,
+            &PtyConfig::default(),
+            Some(42),
+            false,
+        )
+        .await;
+
+        // 连接建立路径在调用方用 add_connect_error_context 补可诊断上下文，
+        // 重试耗尽后的错误必须能被它识别并附上提示。
+        let raw = result.err().expect("退化重试耗尽后必须返回错误");
+        let message = format!("{:#}", add_connect_error_context(raw));
+        assert_eq!(
+            manager.invalidation_count(),
+            DEGRADED_RECONNECT_BACKOFFS.len() as u64,
+            "重试预算用尽后不再失效新的 transport generation"
+        );
+        assert!(
+            message.contains("dropped the SSH transport"),
+            "耗尽重试后仍要给出可诊断的上下文，实际: {message}"
+        );
+        assert!(
+            message.contains("Disconnected"),
+            "错误链必须保留设备断开传输层的原始错误，实际: {message}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn establish_channel_reports_shell_integration_requested_after_supported_probe() {
         let (probe_channel, probe_state) = MockChannel::new(
             [
