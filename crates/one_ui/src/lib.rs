@@ -38,7 +38,8 @@ pub use large_text_editor::{
 pub use panel_header::{PanelHeader, PanelHeaderVariant};
 pub use picker_dialog::{PickerDialogLabels, PickerEntry, open_picker_dialog};
 pub use settings::{
-    TableDisplaySettings, init_table_display_settings, set_table_row_height, table_row_height,
+    TableDisplaySettings, init_table_display_settings, set_table_column_comment_in_header,
+    set_table_row_height, table_column_comment_in_header, table_header_height_or, table_row_height,
     table_row_height_or,
 };
 pub use signature_help::{ExtendedEditor, ExtendedEditorState, SignatureHelpProvider};

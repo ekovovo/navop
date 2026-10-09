@@ -26,6 +26,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     notification::Notification,
+    v_flex,
 };
 use one_assets::IconName;
 use one_core::settings::{AppSettings, installed_grid_monospace_font};
@@ -232,6 +233,18 @@ fn parse_primary_order_by_clause(order_by_clause: &str) -> Option<(String, Colum
     }
 
     Some((primary_clause.to_string(), ColumnSort::Ascending))
+}
+
+/// 列头注释行文本：只有开关打开且注释非空才返回。
+///
+/// 注释里可能带换行或制表符（建表时的多行 COMMENT），这里统一压成单个空格，
+/// 保证列头只占一行；显示不开由渲染层的省略号负责。
+fn header_comment_line(comment: Option<&String>, enabled: bool) -> Option<SharedString> {
+    if !enabled {
+        return None;
+    }
+    let flattened = comment?.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!flattened.is_empty()).then(|| SharedString::from(flattened))
 }
 
 fn normalize_sort_identifier(identifier: &str) -> String {
@@ -1647,24 +1660,31 @@ impl EditTableDelegate for EditorTableDelegate {
             .map(|c| c.name.clone())
             .unwrap_or_default();
 
-        let tooltip_text = original_ix
-            .and_then(|ix| self.column_meta.get(ix))
-            .map(|meta| {
-                let mut text = meta.data_type.to_lowercase().clone();
-                if let Some(comment) = &meta.comment {
-                    if !comment.is_empty() {
-                        text.push('\n');
-                        text.push_str(comment);
+        let (tooltip_text, comment_line) = {
+            let show_comment = one_ui::table_column_comment_in_header(cx);
+            let meta = original_ix.and_then(|ix| self.column_meta.get(ix));
+            let tooltip_text = meta
+                .map(|meta| {
+                    let mut text = meta.data_type.to_lowercase().clone();
+                    if let Some(comment) = &meta.comment {
+                        if !comment.is_empty() {
+                            text.push('\n');
+                            text.push_str(comment);
+                        }
                     }
-                }
-                text
-            })
-            .unwrap_or_default();
+                    text
+                })
+                .unwrap_or_default();
+            let comment_line =
+                meta.and_then(|meta| header_comment_line(meta.comment.as_ref(), show_comment));
+            (tooltip_text, comment_line)
+        };
 
         let font = self.preview_font(cx);
 
         h_flex()
             .id(SharedString::from(format!("col-{}", col_ix)))
+            .debug_selector(move || format!("edit-table-col-{col_ix}-th"))
             .font(font)
             .size_full()
             .items_center()
@@ -1674,11 +1694,34 @@ impl EditTableDelegate for EditorTableDelegate {
                 this.tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
             })
             .child(
-                div()
+                v_flex()
                     .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(col_name),
+                    .min_w_0()
+                    .h_full()
+                    .justify_center()
+                    .child(
+                        div()
+                            .debug_selector(move || format!("edit-table-col-{col_ix}-name"))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(col_name),
+                    )
+                    .when_some(comment_line, |this, comment| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("col-{col_ix}-comment")))
+                                .debug_selector(move || format!("edit-table-col-{col_ix}-comment"))
+                                .flex_shrink_0()
+                                .h(px(one_ui::TableDisplaySettings::COMMENT_LINE_HEIGHT as f32))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(comment),
+                        )
+                    }),
             )
     }
 
@@ -3603,7 +3646,7 @@ mod tests {
     use super::{
         EditorTableDelegate, RowStatus, VerticalCellValue, VerticalRowField, binary_cell_copy_text,
         binary_cell_image_format, binary_download_file_name, binary_edit_values_equal,
-        normalize_sort_identifier, parse_primary_order_by_clause,
+        header_comment_line, normalize_sort_identifier, parse_primary_order_by_clause,
     };
     use db::{ColumnInfo, FieldType, TableCellValue, binary_value::parse_binary_input};
     use gpui::SharedString;
@@ -3659,6 +3702,222 @@ mod tests {
         delegate
             .original_binary_cells
             .insert((row_ix, col_ix), bytes);
+    }
+
+    #[test]
+    fn header_comment_line_needs_both_the_switch_and_a_non_empty_comment() {
+        let comment = "订单号，全局唯一".to_string();
+
+        assert_eq!(None, header_comment_line(None, true));
+        assert_eq!(
+            None,
+            header_comment_line(Some(&"".to_string()), true),
+            "空注释不能占掉一行列头高度"
+        );
+        assert_eq!(
+            None,
+            header_comment_line(Some(&"   \n\t ".to_string()), true),
+            "只有空白字符的注释视为空"
+        );
+        assert_eq!(
+            None,
+            header_comment_line(Some(&comment), false),
+            "开关关闭时保持单行列头"
+        );
+        assert_eq!(
+            Some(SharedString::from("订单号，全局唯一")),
+            header_comment_line(Some(&comment), true)
+        );
+    }
+
+    #[test]
+    fn header_comment_line_flattens_newlines_into_one_line() {
+        // 驱动返回的注释可能带换行/制表符，列头只允许一行。
+        assert_eq!(
+            Some(SharedString::from("创建时间 UTC 秒级")),
+            header_comment_line(Some(&"创建时间\n\tUTC   秒级".to_string()), true)
+        );
+    }
+
+    /// 注释行必须自己承担「单行 + 溢出省略」，且不能反过来把 tooltip 挤掉。
+    #[test]
+    fn the_header_renders_a_truncated_comment_line_below_the_column_name() {
+        let source = include_str!("results_delegate.rs").replace("\r\n", "\n");
+        let implementation = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("tests 模块起始标记")
+            .0;
+        let render_th = slice_function(implementation, "fn render_th(");
+
+        assert!(
+            render_th.contains("header_comment_line("),
+            "列头必须按开关决定是否渲染注释行"
+        );
+        assert!(
+            render_th.contains("text_ellipsis()") && render_th.contains("overflow_hidden()"),
+            "注释行显示不开时要以省略号截断"
+        );
+        assert!(
+            render_th.contains(".whitespace_nowrap()"),
+            "注释行不允许换行"
+        );
+        assert!(
+            render_th.contains(".tooltip("),
+            "开启注释行后仍要保留悬停 tooltip"
+        );
+    }
+
+    /// 真实布局回归：注释行必须落在字段名正下方、恰好一行高，且不超出所属列。
+    ///
+    /// `include_str!` 契约只能钉住样式类名链条，量不到位置与高度；空注释的列也不能
+    /// 因为开关打开就凭空多出内容。
+    #[gpui::test]
+    fn the_comment_line_sits_below_the_column_name_in_a_real_table(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
+            VisualTestContext, Window, WindowOptions, div, px,
+        };
+        use gpui_component::Root;
+        use one_ui::edit_table::{EditTable, EditTableState, TableKeybindings};
+
+        /// 行高与列宽都固定，断言不跟着组件默认值漂移。
+        const ROW_HEIGHT: u32 = 40;
+        const COLUMN_WIDTH: f32 = 140.;
+
+        struct CommentLayoutHost {
+            table: Entity<EditTableState<EditorTableDelegate>>,
+        }
+
+        impl Render for CommentLayoutHost {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().size_full().child(EditTable::new(&self.table))
+            }
+        }
+
+        fn column_meta(name: &str, comment: Option<String>) -> ColumnInfo {
+            ColumnInfo {
+                name: name.to_string(),
+                data_type: "varchar".to_string(),
+                is_nullable: true,
+                is_primary_key: name == "id",
+                default_value: None,
+                comment,
+                charset: None,
+                collation: None,
+                is_auto_increment: false,
+            }
+        }
+
+        let mut delegate = test_delegate(vec![
+            vec![Some("1".to_string()), Some("a".to_string())],
+            vec![Some("2".to_string()), Some("b".to_string())],
+        ]);
+        delegate.columns = vec![
+            Column::new("id", "id").width(px(COLUMN_WIDTH)),
+            Column::new("name", "name"),
+        ];
+        // 带换行与制表符的超长注释：真实布局里仍然只允许占一行。
+        let long_comment = format!(
+            "{}\n第二行\t带制表符",
+            "订单号，业务侧全局唯一，跨库对账以此为准；".repeat(4)
+        );
+        delegate.column_meta = vec![
+            column_meta("id", Some(long_comment)),
+            column_meta("name", None),
+        ];
+
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            // 字体等渲染参数取自 AppSettings，测试窗口需要自己注册。
+            cx.set_global(one_core::settings::AppSettings::default());
+            one_ui::init_table_display_settings(
+                cx,
+                one_ui::TableDisplaySettings::new(ROW_HEIGHT).with_column_comment(true),
+            );
+            one_ui::edit_table::init(cx, &TableKeybindings::default());
+        });
+
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let table = cx.new(|cx| EditTableState::new(delegate, window, cx));
+                let host = cx.new(|_| CommentLayoutHost { table });
+                cx.new(|cx| Root::new(host, window, cx))
+            })
+            .expect("open comment layout window")
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let th = cx
+            .debug_bounds("edit-table-col-0-th")
+            .expect("第一列列头应完成布局");
+        let name = cx
+            .debug_bounds("edit-table-col-0-name")
+            .expect("字段名应继续留在列头里");
+        let comment = cx
+            .debug_bounds("edit-table-col-0-comment")
+            .expect("开关打开后注释行应出现在列头");
+
+        assert_eq!(
+            comment.size.height,
+            px(one_ui::TableDisplaySettings::COMMENT_LINE_HEIGHT as f32),
+            "注释行必须恰好一行高，换行会把列头撑成两行以上"
+        );
+        assert!(
+            comment.top() > name.top(),
+            "注释要在字段名正下方，实际 name.top={name} comment.top={comment}",
+            name = name.top(),
+            comment = comment.top()
+        );
+        assert!(comment.bottom() <= th.bottom(), "注释行不能超出所属列头");
+        assert!(
+            comment.size.width <= th.size.width,
+            "超长注释必须被截在列宽以内，实际 {} > {}",
+            comment.size.width,
+            th.size.width
+        );
+        assert!(
+            cx.debug_bounds("edit-table-col-1-comment").is_none(),
+            "没有注释的列不该凭空多出注释行"
+        );
+
+        // 关掉开关：整行消失，列头回到单行。
+        cx.update(|_, app| one_ui::set_table_column_comment_in_header(false, app));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("edit-table-col-0-comment").is_none(),
+            "开关关闭后注释行应整体消失"
+        );
+    }
+
+    fn slice_function<'a>(source: &'a str, start: &str) -> &'a str {
+        let from = source.find(start).expect("函数起始标记");
+        let rest = &source[from..];
+        let mut depth = 0usize;
+        let mut brace_seen = false;
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    brace_seen = true;
+                }
+                '}' => {
+                    depth -= 1;
+                    if brace_seen && depth == 0 {
+                        return &rest[..index + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest
     }
 
     #[test]

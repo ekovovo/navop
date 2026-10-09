@@ -993,7 +993,8 @@ pub fn init(cx: &mut App) -> anyhow::Result<()> {
     crate::ai_chat_acp::init(cx);
     one_ui::init_table_display_settings(
         cx,
-        one_ui::TableDisplaySettings::new(AppSettings::global(cx).table_row_height),
+        one_ui::TableDisplaySettings::new(AppSettings::global(cx).table_row_height)
+            .with_column_comment(AppSettings::global(cx).table_show_column_comment),
     );
     let table_keybindings = table_keybindings(cx);
     one_ui::init(cx, table_keybindings);
