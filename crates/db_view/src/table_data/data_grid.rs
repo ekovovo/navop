@@ -1,9 +1,10 @@
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnyElement, App, AsyncApp, ClickEvent, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Font, Image, ImageFormat, IntoElement, ListSizingBehavior, ObjectFit,
-    ParentElement, PathPromptOptions, Pixels, ScrollHandle, SharedString, Styled, Subscription,
-    TextRun, UniformListScrollHandle, Window, actions, div, img, px, uniform_list,
+    Anchor, AnyElement, App, AsyncApp, ClickEvent, ClipboardItem, Context, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, Font, Hsla, Image, ImageFormat, IntoElement,
+    ListSizingBehavior, ObjectFit, ParentElement, PathPromptOptions, Pixels, ScrollHandle,
+    ScrollStrategy, SharedString, Stateful, Styled, Subscription, TextRun, UniformListScrollHandle,
+    Window, actions, div, img, px, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, WindowExt,
@@ -144,6 +145,10 @@ pub(super) fn build_column_visibility_panel(data_grid: &Entity<DataGrid>, cx: &A
 
     let search = div().w_full().px_3().pb_2().child(
         Input::new(&search_input)
+            // Medium 档的总高只有 32px，扣掉上下各 8px 内边距和 1px 边框只剩
+            // 14px，而单行 Input 的行盒固定是 1.25rem=20px，placeholder 会被
+            // 裁掉上下各 3px。Large 是这套尺寸档里唯一装得下行盒的档位。
+            .with_size(Size::Large)
             .prefix(Icon::new(IconName::Search).text_color(cx.theme().muted_foreground))
             .cleanable(true)
             .w_full(),
@@ -257,6 +262,166 @@ pub(super) fn build_column_visibility_panel(data_grid: &Entity<DataGrid>, cx: &A
                         .viewport_from_layout(),
                 ),
             ),
+        )
+        .child(footer)
+        .into_any_element()
+}
+
+/// 「字段定位」面板的尺寸与行高。
+///
+/// 取值与「字段过滤」面板一致：两个入口在工具栏上紧挨着，面板忽宽忽窄会让人
+/// 以为是两套东西。常量各自定义而不是直接复用，是为了让契约测试能分别钉住。
+pub(super) const COLUMN_LOCATE_PANEL_WIDTH: Pixels = px(240.);
+pub(super) const COLUMN_LOCATE_PANEL_MAX_HEIGHT: Pixels = px(320.);
+pub(super) const COLUMN_LOCATE_ROW_HEIGHT: Pixels = px(28.);
+
+/// 原始列索引 → 它在可见列里的位序（0 基）。
+///
+/// 表格只渲染可见列，所以隐藏列没有位序，返回 `None` 由调用方决定先取消隐藏。
+pub(super) fn display_position_of_original_column(
+    visible: &[usize],
+    original_ix: usize,
+) -> Option<usize> {
+    visible.iter().position(|&ix| ix == original_ix)
+}
+
+/// 纵向视图里「第一条记录的某个字段」所在的行下标。
+///
+/// 每条记录先占一行记录头，再跟 `column_count` 行字段，所以第 0 条记录的第
+/// `display_col` 个字段固定在 `display_col + 1` 行——与
+/// [`grid_column_of_display_col`] 一样，都是 [`vertical_line_at`] 的反向映射。
+pub(super) fn vertical_line_of_first_field(display_col: usize) -> usize {
+    display_col + 1
+}
+
+/// 渲染「字段定位」面板的字段列表。
+///
+/// 整行可点：一次点击既定位、也把面板收起，因此这里不挂勾选框，只列名字。
+/// 隐藏字段照旧列出并标注状态——用户正是靠定位去找回被过滤掉的列。
+fn render_column_locate_list(
+    rows: &[(usize, SharedString, bool)],
+    data_grid: &Entity<DataGrid>,
+    cx: &App,
+) -> Stateful<Div> {
+    let row_hover_bg: Hsla = cx.theme().muted;
+    let mut list = v_flex().id("column-locate-list").w_full();
+
+    if rows.is_empty() {
+        return list.child(
+            div()
+                .h(COLUMN_LOCATE_ROW_HEIGHT)
+                .px_3()
+                .flex()
+                .items_center()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(t!("TableDataGrid.search_no_match").to_string()),
+        );
+    }
+
+    for (ix, (original_ix, name, visible)) in rows.iter().cloned().enumerate() {
+        let label: SharedString = if name.trim().is_empty() {
+            t!("TableDataGrid.unnamed_column").to_string().into()
+        } else {
+            name
+        };
+        let grid = data_grid.clone();
+        // `hover` / `on_click` 放在最后：`when` 只在 `Stateful<Div>` 上可用，
+        // 一旦进入 Selectable 链就调不动它了——与「字段过滤」面板同一套写法。
+        list = list.child(
+            h_flex()
+                .id(("column-locate-row", ix))
+                .w_full()
+                .h(COLUMN_LOCATE_ROW_HEIGHT)
+                .items_center()
+                .gap_2()
+                .px_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_sm()
+                        .child(label),
+                )
+                .when(!visible, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(t!("TableDataGrid.locate_column_hidden").to_string()),
+                    )
+                })
+                .hover(move |style| style.bg(row_hover_bg))
+                .on_click(move |_, _window, cx| {
+                    grid.update(cx, |grid, cx| grid.locate_column(original_ix, cx));
+                }),
+        );
+    }
+
+    // 高度按行数算出来再封顶：滚动区必须有确定高度，否则内容会把容器撑到全部
+    // 展开，滚动条永远不出现——与「字段过滤」面板同一个坑。
+    let list_height =
+        (COLUMN_LOCATE_ROW_HEIGHT * rows.len().max(1) as f32).min(COLUMN_LOCATE_PANEL_MAX_HEIGHT);
+    list.h(list_height)
+        .overflow_y_scroll()
+        .track_scroll(&data_grid.read(cx).column_locate_scroll)
+}
+
+/// 构建「字段定位」面板：标题、字段搜索框、限高滚动列表与底部说明。
+///
+/// 面板内容每次渲染都会重建，因此读到的搜索词与列可见状态永远是最新的。
+pub(super) fn build_column_locate_panel(data_grid: &Entity<DataGrid>, cx: &App) -> AnyElement {
+    let rows = data_grid.read(cx).column_locate_rows(cx);
+
+    let header = div()
+        .w_full()
+        .px_3()
+        .pt_2()
+        .pb_1()
+        .text_sm()
+        .child(t!("TableDataGrid.locate_column").to_string());
+
+    let search = div().w_full().px_3().pb_2().child(
+        Input::new(&data_grid.read(cx).column_locate_search)
+            // 与「字段过滤」面板同款：档位决定单行 Input 能否装下 1.25rem 行盒。
+            .with_size(Size::Large)
+            .prefix(Icon::new(IconName::Search).text_color(cx.theme().muted_foreground))
+            .cleanable(true)
+            .w_full(),
+    );
+
+    let footer = h_flex()
+        .w_full()
+        .px_3()
+        .py_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .child(
+            div()
+                .min_w_0()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(t!("TableDataGrid.locate_column_hint").to_string()),
+        );
+
+    v_flex()
+        .child(header)
+        .child(search)
+        // 滚动条放在非滚动容器上：它是绝对定位的，放进滚动容器会跟着内容跑。
+        .child(
+            div()
+                .relative()
+                .child(render_column_locate_list(&rows, data_grid, cx))
+                .child(
+                    div().absolute().inset_0().child(
+                        Scrollbar::vertical(&data_grid.read(cx).column_locate_scroll)
+                            .mode(ScrollbarMode::Always)
+                            .viewport_from_layout(),
+                    ),
+                ),
         )
         .child(footer)
         .into_any_element()
@@ -834,12 +999,12 @@ const HORIZONTAL_SCROLLBAR_THICKNESS: Pixels = px(16.);
 /// 部分的字节数外推即可——这个宽度只用来撑开横向滚动区，不必像素级精确。
 const VERTICAL_VALUE_MEASURE_CHARS: usize = 4096;
 
-/// 纵向「字段行」的展示列号 → 网格列号。
+/// 展示列号 → 网格列号。
 ///
-/// `EditTableState` 的选中/编辑坐标是网格坐标，开了行号列时整体右移一位；
-/// 纵向视图只列可见字段、没有行号列。两处换算必须一致，否则点击/编辑会
-/// 落到隔壁列。
-pub(super) fn vertical_field_grid_column(display_col: usize, row_number_enabled: bool) -> usize {
+/// `EditTableState` 的选中/编辑坐标是网格坐标，开了行号列时整体右移一位。
+/// 纵向视图的字段行与「定位字段」都要做这次换算，两处必须共用同一个口径，
+/// 否则点击/选中会落到隔壁列。
+pub(super) fn grid_column_of_display_col(display_col: usize, row_number_enabled: bool) -> usize {
     if row_number_enabled {
         display_col + 1
     } else {
@@ -976,6 +1141,8 @@ struct VerticalFieldLine {
     selected: bool,
     editing: bool,
     modified: bool,
+    /// 这一格是不是刚「定位」到的字段：只染名称格，不染整行。
+    located: bool,
 }
 
 /// 画纵向视图的一行：记录头，或一条「列名 + 值」。
@@ -1077,6 +1244,8 @@ fn render_vertical_line(
                         .text_ellipsis()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
+                        // 定位标记只染名称这一格，值区保持干净。
+                        .when(line.located, |this| this.bg(cx.theme().table_active))
                         .child(line.name),
                 )
                 .child(value_area);
@@ -1135,6 +1304,15 @@ pub struct DataGrid {
     _column_visibility_search_sub: Option<Subscription>,
     /// 「字段过滤」面板的字段列表滚动句柄
     column_visibility_scroll: ScrollHandle,
+    /// 「字段定位」面板里的字段搜索框（同样在 `new()` 里创建，面板重建不丢光标）
+    column_locate_search: Entity<InputState>,
+    /// 字段定位搜索框事件订阅
+    _column_locate_search_sub: Option<Subscription>,
+    /// 「字段定位」面板的字段列表滚动句柄
+    column_locate_scroll: ScrollHandle,
+    /// 「字段定位」面板是否展开。面板是受控 Popover：定位成功后要主动收起，
+    /// 否则盖在表格上的面板正好挡住「定位到了哪一列」这个结果。
+    column_locate_open: bool,
     /// 当前数据库 tab 的共享 SQL 执行记录
     execution_history: Option<Entity<ExecutionHistoryPanel>>,
     /// 侧边栏大文本编辑器是否已为当前表格打开
@@ -1189,6 +1367,13 @@ impl DataGrid {
                 .placeholder(t!("TableDataGrid.column_visibility_search_placeholder").to_string())
                 .clean_on_escape()
         });
+        // 「字段定位」用独立的搜索框：两个面板可能先后打开，共用一个实体
+        // 会让「在过滤框里输入的词」莫名其妙出现在定位框里。
+        let column_locate_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("TableDataGrid.column_visibility_search_placeholder").to_string())
+                .clean_on_escape()
+        });
         let table_data_info = cx.new(|_| TableDataInfo::default());
         let mut result = Self {
             config,
@@ -1204,6 +1389,10 @@ impl DataGrid {
             column_visibility_search,
             _column_visibility_search_sub: None,
             column_visibility_scroll: ScrollHandle::default(),
+            column_locate_search,
+            _column_locate_search_sub: None,
+            column_locate_scroll: ScrollHandle::default(),
+            column_locate_open: false,
             execution_history,
             is_large_text_editor_sidebar_open: false,
             data_generation: Arc::new(AtomicU64::new(0)),
@@ -1215,6 +1404,7 @@ impl DataGrid {
         };
         result.bind_table_event(window, cx);
         result.bind_column_visibility_search_event(window, cx);
+        result.bind_column_locate_search_event(window, cx);
         if is_table_data {
             // 表格数据页的查找输入框就在工具栏里（同页唯一一个搜索框），
             // 表格自身不再浮出查找面板。
@@ -1271,6 +1461,22 @@ impl DataGrid {
             },
         );
         self._column_visibility_search_sub = Some(sub);
+    }
+
+    /// 字段搜索框 → 「字段定位」面板的列表过滤。
+    ///
+    /// 与「字段过滤」同款：搜索词只影响面板自己的列表，不碰表格。
+    fn bind_column_locate_search_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sub = cx.subscribe_in(
+            &self.column_locate_search,
+            window,
+            |_this: &mut DataGrid, _input, evt: &InputEvent, _window, cx| {
+                if let InputEvent::Change = evt {
+                    cx.notify();
+                }
+            },
+        );
+        self._column_locate_search_sub = Some(sub);
     }
 
     fn bind_filter_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1400,6 +1606,58 @@ impl DataGrid {
             self.table.update(cx, |state, cx| state.refresh(cx));
             cx.notify();
         }
+    }
+
+    // ========== 字段定位 ==========
+
+    /// 「字段定位」面板的列表数据：按展示顺序列出全部字段（含被隐藏的字段），
+    /// 再按面板自己的搜索词过滤。
+    ///
+    /// 隐藏字段也列出来是刻意的：用户正是靠定位去找回被「字段过滤」筛掉的列。
+    fn column_locate_rows(&self, cx: &App) -> Vec<(usize, SharedString, bool)> {
+        let entries = self.table.read(cx).delegate().column_visibility_entries();
+        let query = self.column_locate_search.read(cx).text().to_string();
+        filter_column_visibility_entries(&entries, &query)
+    }
+
+    /// 定位到某个字段：必要时先取消该列的隐藏，再把它带到眼前并标记出来。
+    ///
+    /// 标记只用表格自己的「定位列」状态，不走 `set_selected_col`/`select_cell`：
+    /// 那两者会给整列（或整行）逐格染色，绘制量随可见行数线性增长，滚动时最容易
+    /// 掉帧。这里只染一格——网格染表头，纵向染该字段的名称格。
+    fn locate_column(&mut self, original_ix: usize, cx: &mut Context<Self>) {
+        self.column_locate_open = false;
+
+        // 隐藏的列压根不在表格的列组里，先显示它并重建列组，否则无处可滚。
+        self.set_column_visibility(original_ix, true, cx);
+
+        let vertical = self.is_vertical_view(cx);
+        let display_col = {
+            let table = self.table.read(cx);
+            display_position_of_original_column(
+                &table.delegate().visible_column_indices(),
+                original_ix,
+            )
+        };
+        let Some(display_col) = display_col else {
+            // 取消隐藏后仍然算不出位序（列数刚刚变了）：只重画，不猜位置。
+            cx.notify();
+            return;
+        };
+        let row_number_enabled = self.table.read(cx).delegate().row_number_enabled(cx);
+        let grid_col = grid_column_of_display_col(display_col, row_number_enabled);
+
+        if vertical {
+            // 滚动句柄是自绘的 uniform_list，表格状态管不到它，得自己滚。
+            self.vertical_scroll_handle.scroll_to_item(
+                vertical_line_of_first_field(display_col),
+                ScrollStrategy::Top,
+            );
+        }
+        // 两种形态共用同一个标记，各自只染一格。
+        self.table
+            .update(cx, |state, cx| state.set_located_col(grid_col, cx));
+        cx.notify();
     }
 
     fn execution_context(&self) -> ExecutionContext {
@@ -3892,12 +4150,12 @@ impl DataGrid {
     /// 读一条字段行的渲染状态。
     ///
     /// 显示行 → 实际行、展示列 → 原始列只能由 delegate 换算；选中与编辑坐标
-    /// 是网格坐标（含行号列），因此展示列要过 [`vertical_field_grid_column`]。
+    /// 是网格坐标（含行号列），因此展示列要过 [`grid_column_of_display_col`]。
     fn vertical_field_line(&self, row: usize, col: usize, cx: &App) -> Option<VerticalFieldLine> {
         let table = self.table.read(cx);
         let delegate = table.delegate();
         let field = delegate.vertical_field(row, col)?;
-        let grid_col = vertical_field_grid_column(col, delegate.row_number_enabled(cx));
+        let grid_col = grid_column_of_display_col(col, delegate.row_number_enabled(cx));
 
         Some(VerticalFieldLine {
             name: field.name,
@@ -3907,6 +4165,7 @@ impl DataGrid {
             selected: table.selected_cell() == Some((row, grid_col)),
             editing: table.editing_cell() == Some((row, grid_col)),
             modified: delegate.is_cell_modified(row, col, cx),
+            located: table.located_col() == Some(grid_col),
         })
     }
 
@@ -3952,13 +4211,45 @@ impl DataGrid {
             .trigger(
                 Button::new("column-visibility")
                     .with_size(Size::Medium)
-                    .icon(IconName::Column)
+                    .icon(IconName::ListChecks)
                     .when(has_hidden, |this| this.primary())
                     .tooltip(t!("TableDataGrid.column_visibility").to_string())
                     .disabled(loading),
             )
             .content(move |_state, _window, cx| build_column_visibility_panel(&data_grid, cx))
             .w(COLUMN_VISIBILITY_PANEL_WIDTH)
+            .p_0()
+            .into_any_element()
+    }
+
+    /// 「字段定位」入口：列出全部字段，点一个就把表格带到那一列。
+    ///
+    /// 面板必须受控：定位成功后要主动收起它，否则展开着的面板正好挡住
+    /// 「定位到了哪一列」这个结果。字段过滤面板不用收起（要连着勾好几个），
+    /// 所以它保持非受控。
+    fn render_column_locate_button(&self, cx: &Context<Self>) -> AnyElement {
+        let open_grid = cx.entity().clone();
+        let content_grid = cx.entity().clone();
+        let loading = self.table.read(cx).delegate().is_loading();
+
+        Popover::new("column-locate")
+            .trigger(
+                Button::new("column-locate")
+                    .with_size(Size::Medium)
+                    .icon(IconName::LocateActiveTab)
+                    .tooltip(t!("TableDataGrid.locate_column").to_string())
+                    .disabled(loading),
+            )
+            .open(self.column_locate_open)
+            .on_open_change(move |open, _window, cx| {
+                let new_open = *open;
+                open_grid.update(cx, |grid, cx| {
+                    grid.column_locate_open = new_open;
+                    cx.notify();
+                });
+            })
+            .content(move |_state, _window, cx| build_column_locate_panel(&content_grid, cx))
+            .w(COLUMN_LOCATE_PANEL_WIDTH)
             .p_0()
             .into_any_element()
     }
@@ -4117,6 +4408,7 @@ impl DataGrid {
             .child(div().flex_1())
             .child(self.render_view_mode_button(cx))
             .child(self.render_column_visibility_button(cx))
+            .child(self.render_column_locate_button(cx))
             .when_some(find_bar, |this, bar| this.child(bar))
             .when(
                 self.config.usage == DataGridUsage::TableData && editable,
@@ -4518,6 +4810,12 @@ impl Clone for DataGrid {
             column_visibility_search: self.column_visibility_search.clone(),
             _column_visibility_search_sub: None,
             column_visibility_scroll: self.column_visibility_scroll.clone(),
+            // 搜索框按实体共享：副本沿用同一个输入状态；订阅由新的 `new()`
+            // 重新建立，这里一律置 None。
+            column_locate_search: self.column_locate_search.clone(),
+            _column_locate_search_sub: None,
+            column_locate_scroll: self.column_locate_scroll.clone(),
+            column_locate_open: self.column_locate_open,
             execution_history: self.execution_history.clone(),
             is_large_text_editor_sidebar_open: self.is_large_text_editor_sidebar_open,
             data_generation: self.data_generation.clone(),

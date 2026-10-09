@@ -18,7 +18,7 @@
 //! 10. 纵向视图的点击/编辑坐标是网格坐标，展示列必须补上行号列偏移。
 
 use super::data_grid::{
-    VerticalLine, vertical_field_grid_column, vertical_line_at, vertical_line_count,
+    VerticalLine, grid_column_of_display_col, vertical_line_at, vertical_line_count,
     vertical_value_text_width,
 };
 use gpui::px;
@@ -168,13 +168,14 @@ fn the_vertical_view_reads_cells_through_the_delegate_boundary() {
 }
 
 #[test]
-fn vertical_field_columns_skip_the_row_number_column() {
+fn display_columns_skip_the_row_number_column() {
     // 开了行号列时，展示列 0 对应网格列 1；`EditTableState` 的选中与编辑
-    // 都用网格坐标，算错一位就会点中隔壁字段。
-    assert_eq!(1, vertical_field_grid_column(0, true));
-    assert_eq!(3, vertical_field_grid_column(2, true));
-    assert_eq!(0, vertical_field_grid_column(0, false));
-    assert_eq!(2, vertical_field_grid_column(2, false));
+    // 都用网格坐标，算错一位就会点中隔壁字段。纵向视图的字段行与
+    // 「定位字段」共用这份换算。
+    assert_eq!(1, grid_column_of_display_col(0, true));
+    assert_eq!(3, grid_column_of_display_col(2, true));
+    assert_eq!(0, grid_column_of_display_col(0, false));
+    assert_eq!(2, grid_column_of_display_col(2, false));
 }
 
 #[test]
