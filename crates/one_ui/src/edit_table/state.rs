@@ -35,6 +35,12 @@ use gpui_component::{
 use one_assets::IconName;
 use rust_i18n::t;
 
+
+/// 列头行在布局测试里的 debug selector，非 test 构建为空实现。
+pub(crate) const HEAD_ROW_SELECTOR: &str = "edit-table-head-row";
+/// 数据行 debug selector 前缀，后面接行号，例如 `edit-table-row-0`。
+pub(crate) const ROW_SELECTOR_PREFIX: &str = "edit-table-row-";
+
 /// 列宽分隔线本身的宽度。
 const COLUMN_RESIZE_LINE_WIDTH: Pixels = px(1.);
 
@@ -378,6 +384,12 @@ where
                 this.on_find_panel_event(event, window, cx);
             },
         ));
+        // 行高与「列头显示字段注释」都是应用级全局，改完不会通知任何 View。
+        // 订阅全局本身，已经打开的表格才能在设置页拨动开关的当下立即重排列头。
+        this._subscriptions
+            .push(cx.observe_global::<crate::TableDisplaySettings>(|_, cx| {
+                cx.notify();
+            }));
         this.prepare_col_groups(cx);
         this
     }
@@ -3482,10 +3494,11 @@ where
         header
             .h_flex()
             .w_full()
-            .h(crate::table_row_height_or(
+            .h(crate::table_header_height_or(
                 cx,
                 self.options.size.table_row_height(),
             ))
+            .debug_selector(|| HEAD_ROW_SELECTOR.to_owned())
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -3585,6 +3598,7 @@ where
             tr.h_flex()
                 .w_full()
                 .h(row_height)
+                .debug_selector(move || format!("{ROW_SELECTOR_PREFIX}{row_ix}"))
                 .when(need_render_border, |this| {
                     this.border_b_1().border_color(cx.theme().table_row_border)
                 })
@@ -3778,7 +3792,7 @@ where
             div()
                 .occlude()
                 .absolute()
-                .top(crate::table_row_height_or(
+                .top(crate::table_header_height_or(
                     cx,
                     self.options.size.table_row_height(),
                 ))
@@ -4033,6 +4047,67 @@ mod tests {
         assert!(source.contains(
             "Scrollbar::horizontal(&self.horizontal_scroll_handle)\n                    .mode(ScrollbarMode::Always)\n                    .viewport_from_layout()"
         ));
+    }
+
+    /// 列头高度与数据行高必须分开取值：开启「列头显示字段注释」只加高列头，
+    /// 数据行仍跟随行高设置；纵向滚动条的起点也要跟着列头下移。
+    #[test]
+    fn the_header_has_its_own_height_while_rows_keep_the_row_height() {
+        let source = include_str!("state.rs").replace("\r\n", "\n");
+        let implementation = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("tests 模块起始标记")
+            .0;
+
+        let header = slice_between(
+            implementation,
+            "fn render_table_header(",
+            "\n    fn render_table_row(",
+        );
+        assert!(
+            header.contains("crate::table_header_height_or("),
+            "列头容器必须使用列头高度"
+        );
+        assert!(
+            !header.contains("crate::table_row_height_or("),
+            "列头容器不得再直接使用数据行高"
+        );
+
+        let body = slice_between(
+            implementation,
+            "fn render_table_row(",
+            "\n    fn render_vertical_scrollbar(",
+        );
+        assert!(
+            body.contains("crate::table_row_height_or("),
+            "数据行必须继续跟随行高设置"
+        );
+        assert!(
+            !body.contains("table_header_height_or("),
+            "数据行不受列头注释行影响"
+        );
+
+        let scrollbar = slice_between(
+            implementation,
+            "fn render_vertical_scrollbar(",
+            "\n    fn render_horizontal_scrollbar(",
+        );
+        assert!(
+            scrollbar.contains("crate::table_header_height_or("),
+            "纵向滚动条要从加高后的列头下方开始"
+        );
+
+        // 行高与列头注释开关都只是应用级全局，替换全局不会通知任何 View；
+        // 表格必须订阅 TableDisplaySettings，已经打开的表格才能立刻重排。
+        let constructor = slice_between(
+            implementation,
+            "pub fn new(delegate: D,",
+            "\n    pub fn delegate(",
+        );
+        assert!(
+            constructor.contains("cx.observe_global::<crate::TableDisplaySettings>"),
+            "EditTableState 必须订阅 TableDisplaySettings 并 notify"
+        );
     }
 }
 

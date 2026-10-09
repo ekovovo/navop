@@ -2993,6 +2993,14 @@ Settings:
         en: Set the height of database table and editable grid rows (24-100 pixels)
         zh-CN: 设置数据库表和可编辑表格的行高（24-100像素）
         zh-HK: 設置資料庫表和可編輯表格的行高（24-100像素）
+      table_show_column_comment:
+        en: Show Column Comment in Header
+        zh-CN: 列头显示字段注释
+        zh-HK: 列頭顯示欄位註釋
+      table_show_column_comment_desc:
+        en: Show each column's comment on its own line below the column name, truncated with an ellipsis when it does not fit. Hover tooltips still work.
+        zh-CN: 在字段名下方单独一行常驻显示该字段的注释，显示不开时以省略号截断；悬停提示仍然保留。
+        zh-HK: 在欄位名下方單獨一行常駐顯示該欄位的註釋，顯示不開時以省略號截斷；懸停提示仍然保留。
       table_view_mode:
         en: Result Display Mode
         zh-CN: 结果显示方式

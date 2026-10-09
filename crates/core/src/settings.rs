@@ -1158,6 +1158,9 @@ pub struct AppSettings {
     /// 数据表格的显示方式：网格（默认）或纵向「列：值」
     #[serde(default)]
     pub table_view_mode: TableViewMode,
+    /// 在数据表格列头下方常驻显示字段注释，默认关闭
+    #[serde(default)]
+    pub table_show_column_comment: bool,
     /// SQL 查询默认最大返回行数，0 表示不限制
     #[serde(default = "default_sql_query_max_rows")]
     pub sql_query_max_rows: u32,
@@ -1526,6 +1529,7 @@ impl Default for AppSettings {
             system_hotkey_other: default_system_hotkey_other(),
             table_row_height: default_table_row_height(),
             table_view_mode: TableViewMode::default(),
+            table_show_column_comment: false,
             sql_query_max_rows: default_sql_query_max_rows(),
             sql_export_rows_per_statement: default_sql_export_rows_per_statement(),
             sql_format: SqlFormatSettings::default(),
@@ -2299,6 +2303,27 @@ mod tests {
         .expect("table_view_mode 应能从 settings.json 读回");
 
         assert_eq!(TableViewMode::Vertical, settings.table_view_mode);
+    }
+
+    #[test]
+    fn table_column_comment_is_off_by_default_and_round_trips() {
+        assert!(
+            !AppSettings::default().table_show_column_comment,
+            "列头注释行默认关闭"
+        );
+
+        let legacy: AppSettings = serde_json::from_value(serde_json::json!({
+            "locale": "en",
+            "table_row_height": 44
+        }))
+        .expect("缺少 table_show_column_comment 的旧版 settings.json 应能读取");
+        assert!(!legacy.table_show_column_comment);
+
+        let enabled: AppSettings = serde_json::from_value(serde_json::json!({
+            "table_show_column_comment": true
+        }))
+        .expect("table_show_column_comment 应能从 settings.json 读回");
+        assert!(enabled.table_show_column_comment);
     }
 
     #[test]

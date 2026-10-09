@@ -10,6 +10,9 @@ pub mod selection;
 mod state;
 pub mod tsv;
 
+#[cfg(test)]
+mod header_height_tests;
+
 use std::collections::HashSet;
 
 use gpui::{Action, App, KeyBinding, Keystroke, NoAction};

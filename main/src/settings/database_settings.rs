@@ -148,6 +148,22 @@ pub fn database_setting_group() -> SettingGroup {
             )
             .description(t!("Settings.General.Database.table_row_height_desc").to_string()),
             SettingItem::new(
+                t!("Settings.General.Database.table_show_column_comment"),
+                SettingField::switch(
+                    |cx: &App| AppSettings::global(cx).table_show_column_comment,
+                    |val: bool, cx: &mut App| {
+                        AppSettings::update_and_save(cx, |settings| {
+                            settings.table_show_column_comment = val;
+                        });
+                        one_ui::set_table_column_comment_in_header(val, cx);
+                    },
+                )
+                .default_value(default_settings.table_show_column_comment),
+            )
+            .description(
+                t!("Settings.General.Database.table_show_column_comment_desc").to_string(),
+            ),
+            SettingItem::new(
                 t!("Settings.General.Database.table_view_mode"),
                 SettingField::dropdown(
                     vec![
