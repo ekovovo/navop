@@ -49,10 +49,7 @@ fn non_canonical_host_key_is_accepted() {
         .expect("非规范 mpint 主机公钥应被接受（ssh-encoding fork 生效）");
 
     let expected = PublicKey::from_bytes(&canonical_blob()).expect("规范编码本身应可解析");
-    assert_eq!(
-        key, expected,
-        "归一化后的公钥应与规范编码逐字节等价"
-    );
+    assert_eq!(key, expected, "归一化后的公钥应与规范编码逐字节等价");
 }
 
 /// 前导零被裁掉而不是被当成值的一部分：e / n 的数值必须保持不变。

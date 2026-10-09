@@ -715,9 +715,7 @@ impl SettingsPanel {
                             SettingItem::new(
                                 t!("Settings.General.Font.sql_editor_hover_enabled"),
                                 SettingField::switch(
-                                    |cx: &App| {
-                                        AppSettings::global(cx).sql_editor_hover_enabled
-                                    },
+                                    |cx: &App| AppSettings::global(cx).sql_editor_hover_enabled,
                                     |value: bool, cx: &mut App| {
                                         AppSettings::update_and_save(cx, |settings| {
                                             settings.sql_editor_hover_enabled = value;
@@ -1129,17 +1127,17 @@ fn sync_setting_group(
     items.push(personal_sync_auto_sync_item(defaults.auto_sync));
     items.push(personal_sync_git_auto_push_item(defaults.git.auto_push));
     items.push(
-        SettingItem::render(move |_options, window, cx| {
-            render_personal_sync_actions(window, cx)
-        })
-        .keywords([
-            t!("Settings.Sync.status").to_string(),
-            t!("Settings.Sync.test_connection").to_string(),
-            t!("Settings.Sync.sync_now").to_string(),
-        ]),
+        SettingItem::render(move |_options, window, cx| render_personal_sync_actions(window, cx))
+            .keywords([
+                t!("Settings.Sync.status").to_string(),
+                t!("Settings.Sync.test_connection").to_string(),
+                t!("Settings.Sync.sync_now").to_string(),
+            ]),
     );
 
-    SettingGroup::new().title(t!("Settings.Sync.group_title")).items(items)
+    SettingGroup::new()
+        .title(t!("Settings.Sync.group_title"))
+        .items(items)
 }
 
 fn sync_enabled_item(default: bool) -> SettingItem {
@@ -1486,7 +1484,11 @@ fn render_personal_sync_webdav_text_field(
     cx: &mut App,
 ) -> gpui::AnyElement {
     let value = match field {
-        "username" => AppSettings::global(cx).personal_sync.webdav.username.clone(),
+        "username" => AppSettings::global(cx)
+            .personal_sync
+            .webdav
+            .username
+            .clone(),
         _ => AppSettings::global(cx).personal_sync.webdav.url.clone(),
     };
     let input = bind_webdav_input(field, "", options, window, cx, |window, cx| {

@@ -503,11 +503,7 @@ impl WindowsNativeAdapter {
     ) -> anyhow::Result<()> {
         let bounds = logical_bounds_to_physical(bounds, parent_client_origin, scale_factor)
             .ok_or_else(|| anyhow::anyhow!("invalid native child bounds or scale factor"))?;
-        let mut sink = Self::sink(
-            &mut self.overlay,
-            &mut self.host,
-            self.composition.as_mut(),
-        );
+        let mut sink = Self::sink(&mut self.overlay, &mut self.host, self.composition.as_mut());
         self.presentation.update_bounds(bounds, &mut sink)?;
         Ok(())
     }
@@ -527,21 +523,13 @@ impl WindowsNativeAdapter {
     }
 
     pub(crate) fn activate(&mut self, focus_child: bool) -> anyhow::Result<()> {
-        let mut sink = Self::sink(
-            &mut self.overlay,
-            &mut self.host,
-            self.composition.as_mut(),
-        );
+        let mut sink = Self::sink(&mut self.overlay, &mut self.host, self.composition.as_mut());
         self.presentation.activate(focus_child, &mut sink)?;
         Ok(())
     }
 
     pub(crate) fn focus(&mut self) -> anyhow::Result<()> {
-        let mut sink = Self::sink(
-            &mut self.overlay,
-            &mut self.host,
-            self.composition.as_mut(),
-        );
+        let mut sink = Self::sink(&mut self.overlay, &mut self.host, self.composition.as_mut());
         self.presentation.focus(&mut sink)?;
         Ok(())
     }

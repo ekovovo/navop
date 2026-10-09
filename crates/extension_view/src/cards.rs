@@ -198,21 +198,18 @@ fn card_header(
                 .truncate()
                 .child(name.to_string()),
         )
-        .when_some(
-            (!version.is_empty()).then_some(version),
-            |this, version| {
-                this.child(
-                    div()
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded(px(6.0))
-                        .text_xs()
-                        .text_color(muted)
-                        .bg(gpui::black().opacity(0.04))
-                        .child(format!("v{version}")),
-                )
-            },
-        )
+        .when_some((!version.is_empty()).then_some(version), |this, version| {
+            this.child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(px(6.0))
+                    .text_xs()
+                    .text_color(muted)
+                    .bg(gpui::black().opacity(0.04))
+                    .child(format!("v{version}")),
+            )
+        })
         .child(
             Icon::new(IconName::ExternalLink)
                 .with_size(IconSize::Small)

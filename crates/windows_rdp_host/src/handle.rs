@@ -601,11 +601,7 @@ impl Drop for WindowsRdpHost {
 /// The counter matters because a failed close can still leave the native host
 /// alive while the Rust wrapper is dropped, which a `Drop`-only audit would
 /// misreport as a clean release.
-fn record_host_close_failure(
-    generation: u64,
-    stage: &'static str,
-    error: &WindowsRdpHostError,
-) {
+fn record_host_close_failure(generation: u64, stage: &'static str, error: &WindowsRdpHostError) {
     crate::lifecycle_stats::global().record_host_close_failed();
     tracing::error!(
         target: "windows_rdp_host::lifecycle",

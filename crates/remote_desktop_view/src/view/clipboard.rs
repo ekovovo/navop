@@ -23,7 +23,8 @@ const REMOTE_CLIPBOARD_STAGING_ROOT: &str = "navop-rdp-clipboard";
 /// format after the file stream transfer, and honouring it would overwrite
 /// the just-installed file clipboard with plain text (making Finder paste a
 /// "已粘贴 <date>" file instead of the actual file).
-const REMOTE_TEXT_AFTER_FILES_SUPPRESS: Duration = Duration::from_secs(3);fn clipboard_sync_is_due(
+const REMOTE_TEXT_AFTER_FILES_SUPPRESS: Duration = Duration::from_secs(3);
+fn clipboard_sync_is_due(
     last_clipboard_unavailable_at: Option<Instant>,
     last_clipboard_sync_at: Option<Instant>,
     now: Instant,
@@ -65,9 +66,8 @@ fn is_remote_clipboard_transfer_id(transfer_id: u64) -> bool {
 /// text announcements (rdpclip re-announces a copied file's text format after
 /// the file stream transfer; honouring it would overwrite the file clipboard).
 fn remote_text_suppressed_after_files(installed_at: Option<Instant>, now: Instant) -> bool {
-    installed_at.is_some_and(|at| {
-        now.saturating_duration_since(at) < REMOTE_TEXT_AFTER_FILES_SUPPRESS
-    })
+    installed_at
+        .is_some_and(|at| now.saturating_duration_since(at) < REMOTE_TEXT_AFTER_FILES_SUPPRESS)
 }
 
 /// True while the clipboard still holds files installed from the remote and

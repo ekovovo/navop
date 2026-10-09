@@ -2,7 +2,7 @@
 
 use gpui::{
     App, AppContext, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, StyledImage, StatefulInteractiveElement, Window,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
     div, img, px, rems,
 };
 use gpui_component::{ActiveTheme, Icon, Sizable, h_flex, scroll::ScrollableElement, v_flex};
@@ -36,11 +36,7 @@ const DIALOG_BOTTOM_PADDING_PX: f32 = 12.0;
 /// 走可复用入口（关闭即隐藏）：macOS 上销毁原生窗口会踩到 Touch Bar KVO 竞态
 /// （`EXC_CRASH (SIGABRT)`）。重新打开时用本次的 `entry` 重建 view，所以换一个扩展
 /// 看到的一定是新那个。
-pub(super) fn show_detail_dialog(
-    entry: MarketplaceEntry,
-    window: &mut Window,
-    cx: &mut App,
-) {
+pub(super) fn show_detail_dialog(entry: MarketplaceEntry, window: &mut Window, cx: &mut App) {
     let options = one_core::popup_window::PopupWindowOptions::new(t!("Extension.detail_title"))
         .size(DIALOG_WIDTH, DIALOG_HEIGHT);
     one_core::popup_window::open_reusable_popup_window(
@@ -89,7 +85,12 @@ impl ExtensionDetailView {
         cx.notify();
     }
 
-    fn render_header(&self, fg: gpui::Hsla, muted: gpui::Hsla, cx: &Context<Self>) -> impl IntoElement {
+    fn render_header(
+        &self,
+        fg: gpui::Hsla,
+        muted: gpui::Hsla,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let entry = &self.entry;
         h_flex()
             .gap_3()
@@ -153,13 +154,7 @@ impl ExtensionDetailView {
                     .text_color(muted)
                     .child(label),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .child(value),
-            )
+            .child(div().flex_1().min_w_0().text_sm().child(value))
     }
 
     /// 完整元信息：所有可展示字段，缺失的跳过。
@@ -258,20 +253,19 @@ impl ExtensionDetailView {
             )
             .child(
                 // 缩略图网格：圆角小图，hover 高亮并切换预览；固定高度不参与弹性。
-                v_flex()
-                    .flex_none()
-                    .w_full()
-                    .gap_2()
-                    .children(screenshots.chunks(THUMB_COLUMNS).enumerate().map(
-                        |(row, chunk)| {
-                            h_flex().gap_2().children(
-                                chunk.iter().enumerate().map(|(column, source)| {
+                v_flex().flex_none().w_full().gap_2().children(
+                    screenshots
+                        .chunks(THUMB_COLUMNS)
+                        .enumerate()
+                        .map(|(row, chunk)| {
+                            h_flex().gap_2().children(chunk.iter().enumerate().map(
+                                |(column, source)| {
                                     let index = row * THUMB_COLUMNS + column;
                                     self.render_thumbnail(source, index, muted, cx)
-                                }),
-                            )
-                        },
-                    )),
+                                },
+                            ))
+                        }),
+                ),
             )
             .into_any_element()
     }
@@ -309,7 +303,11 @@ impl ExtensionDetailView {
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                 view.hover_screenshot(hovered.then_some(index), cx);
             }))
-            .child(img(source.to_string()).size_full().object_fit(gpui::ObjectFit::Cover))
+            .child(
+                img(source.to_string())
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
     }
 }
 
@@ -360,10 +358,9 @@ impl Render for ExtensionDetailView {
                             .pt_2()
                             .border_t_1()
                             .border_color(cx.theme().border)
-                            .child(self.render_section_title(
-                                t!("Extension.detail_info").into(),
-                                fg,
-                            ))
+                            .child(
+                                self.render_section_title(t!("Extension.detail_info").into(), fg),
+                            )
                             .child(self.render_meta(muted, cx)),
                     ),
             )
@@ -374,10 +371,7 @@ impl Render for ExtensionDetailView {
                     .flex_1()
                     .min_h_0()
                     .gap_2()
-                    .child(self.render_section_title(
-                        t!("Extension.detail_screenshots").into(),
-                        fg,
-                    ))
+                    .child(self.render_section_title(t!("Extension.detail_screenshots").into(), fg))
                     .child(self.render_gallery(muted, cx)),
             )
     }
@@ -398,7 +392,11 @@ fn detail_icon_tile(kind: ExtensionKind, cx: &App) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(Icon::new(kind_icon(kind)).with_size(IconSize::Medium).color())
+        .child(
+            Icon::new(kind_icon(kind))
+                .with_size(IconSize::Medium)
+                .color(),
+        )
 }
 
 #[cfg(test)]

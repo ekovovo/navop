@@ -285,7 +285,10 @@ fn connect_request_carries_the_graphics_pipeline_policy() {
             },
         );
         let encoded = serde_json::to_value(&request).expect("connect request encodes");
-        assert_eq!(Some(&serde_json::Value::String(wire.to_string())), encoded.get("egfx"));
+        assert_eq!(
+            Some(&serde_json::Value::String(wire.to_string())),
+            encoded.get("egfx")
+        );
 
         let line = encode_request_line(&request).expect("connect request encodes");
         let decoded = decode_request_line(&line).expect("connect request decodes");

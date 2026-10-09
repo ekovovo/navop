@@ -382,10 +382,8 @@ mod tests {
 
     #[test]
     fn ensure_user_message_keeps_existing_user_message() {
-        let messages = normalize_system_messages(vec![
-            Message::system("主系统提示"),
-            Message::user("你好"),
-        ]);
+        let messages =
+            normalize_system_messages(vec![Message::system("主系统提示"), Message::user("你好")]);
 
         let messages = ensure_user_message(messages);
 

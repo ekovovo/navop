@@ -154,7 +154,10 @@ fn create_rdp_connection_without_a_graphics_policy_keeps_legacy_params() {
         RdpEgfxMode::Auto,
         params.effective_rdp_settings().graphics.egfx
     );
-    assert_eq!(RdpAudioMode::Local, params.effective_rdp_settings().audio.mode);
+    assert_eq!(
+        RdpAudioMode::Local,
+        params.effective_rdp_settings().audio.mode
+    );
 }
 
 #[test]

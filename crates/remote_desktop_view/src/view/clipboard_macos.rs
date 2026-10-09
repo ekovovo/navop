@@ -75,9 +75,9 @@ fn write_files_to_pasteboard(pasteboard: &NSPasteboard, paths: &[PathBuf]) -> an
 #[allow(deprecated)]
 #[cfg(test)]
 mod tests {
-    use objc2::msg_send;
     use objc2::ClassType as _;
     use objc2::ffi::NSUInteger;
+    use objc2::msg_send;
 
     use super::*;
 

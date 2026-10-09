@@ -819,9 +819,7 @@ impl Default for PersonalWebdavSyncSettings {
 impl PersonalWebdavSyncSettings {
     /// 三个字段都非空才算配置完整，此时 `test_connection` / `sync_now` 才可用。
     pub fn is_complete(&self) -> bool {
-        !self.url.trim().is_empty()
-            && !self.username.trim().is_empty()
-            && !self.password.is_empty()
+        !self.url.trim().is_empty() && !self.username.trim().is_empty() && !self.password.is_empty()
     }
 }
 

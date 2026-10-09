@@ -43,7 +43,8 @@ impl DeltaLimits {
         let bytes = screen_bytes
             .saturating_mul(PENDING_DELTA_SCREEN_BUDGET)
             .clamp(MIN_PENDING_DELTA_BYTES, MAX_PENDING_DELTA_BYTES);
-        let rects = (pixels / PIXELS_PER_PENDING_DELTA_RECT).clamp(MIN_PENDING_DELTA_RECTS, MAX_PENDING_DELTA_RECTS);
+        let rects = (pixels / PIXELS_PER_PENDING_DELTA_RECT)
+            .clamp(MIN_PENDING_DELTA_RECTS, MAX_PENDING_DELTA_RECTS);
 
         Self { rects, bytes }
     }

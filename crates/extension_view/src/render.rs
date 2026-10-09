@@ -1,10 +1,15 @@
 use gpui::{
     Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, linear_color_stop,
-    linear_gradient, px, rems, prelude::FluentBuilder,
+    linear_gradient, prelude::FluentBuilder, px, rems,
 };
 use gpui_component::{
-    ActiveTheme, Icon, Sizable, Size, button::{Button, ButtonRounded, ButtonVariants},
-    h_flex, input::Input, progress::Progress, scroll::ScrollableElement, v_flex,
+    ActiveTheme, Icon, Sizable, Size,
+    button::{Button, ButtonRounded, ButtonVariants},
+    h_flex,
+    input::Input,
+    progress::Progress,
+    scroll::ScrollableElement,
+    v_flex,
 };
 use one_assets::IconName;
 use one_ui::{IconSize, PanelHeader, PanelHeaderVariant};
@@ -194,16 +199,13 @@ impl ExtensionManagerView {
             .min(window.viewport_size().width - px(64.0))
             .max(px(280.0));
 
-        let search = div()
-            .w(search_width)
-            .h(px(SEARCH_HEIGHT_PX))
-            .child(
-                Input::new(&self.search)
-                    .with_size(Size::Large)
-                    .size_full()
-                    .rounded(px(12.0))
-                    .prefix(Icon::new(IconName::Search).with_size(IconSize::Medium)),
-            );
+        let search = div().w(search_width).h(px(SEARCH_HEIGHT_PX)).child(
+            Input::new(&self.search)
+                .with_size(Size::Large)
+                .size_full()
+                .rounded(px(12.0))
+                .prefix(Icon::new(IconName::Search).with_size(IconSize::Medium)),
+        );
 
         let (title_top, title_bottom) = if is_marketplace {
             (
@@ -233,24 +235,16 @@ impl ExtensionManagerView {
                     .text_color(fg)
                     .child(
                         // 末行追加打字光标块，复刻 Market 网站的输入动效。
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(title_top)
-                            .child(
-                                h_flex()
-                                    .items_end()
-                                    .gap_2()
-                                    .child(title_bottom)
-                                    .child(
-                                        div()
-                                            .w(px(HERO_CARET_WIDTH_PX))
-                                            .h(px(HERO_CARET_HEIGHT_PX))
-                                            .mb(px(HERO_CARET_BOTTOM_OFFSET_PX))
-                                            .rounded(px(2.0))
-                                            .bg(accent),
-                                    ),
+                        h_flex().items_center().gap_2().child(title_top).child(
+                            h_flex().items_end().gap_2().child(title_bottom).child(
+                                div()
+                                    .w(px(HERO_CARET_WIDTH_PX))
+                                    .h(px(HERO_CARET_HEIGHT_PX))
+                                    .mb(px(HERO_CARET_BOTTOM_OFFSET_PX))
+                                    .rounded(px(2.0))
+                                    .bg(accent),
                             ),
+                        ),
                     ),
             )
             .child(
@@ -339,16 +333,10 @@ impl ExtensionManagerView {
     }
 
     /// 分类 chips：xsmall 居中单行；超宽折叠为「前缀 + 更多」，点击展开多行。
-    fn render_kind_filters(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_kind_filters(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let is_marketplace = self.mode == ExtensionManagerMode::Marketplace;
-        let mut entries: Vec<(Option<ExtensionKind>, String)> = vec![(
-            None,
-            t!("Extension.kind_all").to_string(),
-        )];
+        let mut entries: Vec<(Option<ExtensionKind>, String)> =
+            vec![(None, t!("Extension.kind_all").to_string())];
         entries.extend(
             EXTENSION_KINDS
                 .into_iter()
@@ -362,8 +350,7 @@ impl ExtensionManagerView {
             is_marketplace && index == entries.len() - 1 && kind.is_none()
         };
 
-        let available_width = f32::from(window.viewport_size().width)
-            .min(CONTENT_MAX_WIDTH_PX)
+        let available_width = f32::from(window.viewport_size().width).min(CONTENT_MAX_WIDTH_PX)
             - BODY_HORIZONTAL_PADDING;
         let labels: Vec<&str> = entries.iter().map(|(_, label)| label.as_str()).collect();
         // 选中索引：市场模式下“有更新”激活时定位到最后一项，否则按 kind 匹配。

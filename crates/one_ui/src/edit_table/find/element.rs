@@ -192,9 +192,10 @@ impl Element for FindHighlightElement {
             strikethrough: None,
         };
 
-        let Ok(lines) = window
-            .text_system()
-            .shape_text(self.text.clone(), font_size, &[run], None, None)
+        let Ok(lines) =
+            window
+                .text_system()
+                .shape_text(self.text.clone(), font_size, &[run], None, None)
         else {
             return;
         };

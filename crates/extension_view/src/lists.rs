@@ -2,7 +2,8 @@
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{
-    ActiveTheme, Icon, Sizable, button::{Button, ButtonRounded, ButtonVariants},
+    ActiveTheme, Icon, Sizable,
+    button::{Button, ButtonRounded, ButtonVariants},
     h_flex, v_flex,
 };
 use one_assets::IconName;
@@ -13,7 +14,8 @@ use crate::{
     ExtensionManagerView, MarketplaceEntry,
     card_view::{installed_card, installed_card_data, marketplace_card, marketplace_card_data},
     cards::{extension_kind_id, kind_label, section_header},
-    filter_installed, filter_marketplace, filter_updatable_marketplace, grid::card_grid_metrics,
+    filter_installed, filter_marketplace, filter_updatable_marketplace,
+    grid::card_grid_metrics,
     state::{MarketplaceLoadState, marketplace_sections},
 };
 

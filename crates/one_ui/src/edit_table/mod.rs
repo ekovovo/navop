@@ -1,8 +1,8 @@
 mod column;
 mod delegate;
-pub mod find;
 pub mod filter_panel;
 mod filter_state;
+pub mod find;
 pub(crate) mod loading;
 #[cfg(test)]
 mod resize_handle_tests;

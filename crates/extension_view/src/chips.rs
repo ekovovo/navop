@@ -53,9 +53,12 @@ pub(crate) fn plan_chip_row(
     available_width: f32,
     selected: Option<usize>,
 ) -> ChipRowPlan {
-    let widths: Vec<f32> = labels.iter().map(|label| estimate_chip_width(label)).collect();
-    let total_width = widths.iter().sum::<f32>()
-        + CHIP_GAP_PX * labels.len().saturating_sub(1) as f32;
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|label| estimate_chip_width(label))
+        .collect();
+    let total_width =
+        widths.iter().sum::<f32>() + CHIP_GAP_PX * labels.len().saturating_sub(1) as f32;
     if total_width <= available_width {
         return ChipRowPlan {
             visible: (0..labels.len()).collect(),
@@ -103,7 +106,10 @@ mod tests {
         let widths = vec![40.0, 40.0, 40.0];
         assert_eq!(1, fitting_chip_count(&widths, 40.0 * 3.0 + 8.0 * 2.0));
         // 备足余量时三个全部放下。
-        assert_eq!(3, fitting_chip_count(&widths, 40.0 * 3.0 + 8.0 * 2.0 + 200.0));
+        assert_eq!(
+            3,
+            fitting_chip_count(&widths, 40.0 * 3.0 + 8.0 * 2.0 + 200.0)
+        );
     }
 
     #[test]
@@ -115,7 +121,11 @@ mod tests {
 
     #[test]
     fn plan_truncates_and_reports_hidden_count() {
-        let result = plan(&["全部", "语言", "语言包", "数据库驱动", "远程桌面"], 120.0, None);
+        let result = plan(
+            &["全部", "语言", "语言包", "数据库驱动", "远程桌面"],
+            120.0,
+            None,
+        );
         assert!(result.hidden_count >= 1, "溢出行应折叠至少一个 chip");
         assert!(result.visible.len() < 5);
         assert_eq!(

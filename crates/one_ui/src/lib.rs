@@ -27,7 +27,7 @@ pub use content_state::{ContentState, ContentStateKind};
 pub use edit_table::{
     CellCoord, CellEditor, CellRange, Column, ColumnFixed, ColumnSort, EditTable,
     EditTableDelegate, EditTableEvent, EditTableState, FilterState, FilterValue, FindOutcome,
-    SearchPanel, SearchPanelEvent, ScrollbarVisible, SelectNextColumn, SelectPrevColumn,
+    ScrollbarVisible, SearchPanel, SearchPanelEvent, SelectNextColumn, SelectPrevColumn,
     TableKeybindings, TableOptions, TableSelection, TableVisibleRange, refresh_keybindings,
 };
 use gpui::App;

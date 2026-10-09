@@ -7,9 +7,9 @@ use std::{
 
 use super::filter_state::FilterState;
 use super::find::{
-    FindHighlightElement, FindMatch, FindOutcome, HighlightSegment, SearchPanel,
-    SearchPanelEvent, find_highlight_color, mark_current_match_at, normalize_find_query,
-    resolve_find, row_highlight_ranges, row_matches, scroll_target_for_match,
+    FindHighlightElement, FindMatch, FindOutcome, HighlightSegment, SearchPanel, SearchPanelEvent,
+    find_highlight_color, mark_current_match_at, normalize_find_query, resolve_find,
+    row_highlight_ranges, row_matches, scroll_target_for_match,
 };
 use super::selection::{CellCoord, TableSelection};
 use super::tsv::{encode_tsv_rows, parse_tsv_rows};
@@ -1321,7 +1321,8 @@ where
             // 输入框在宿主那边，焦点只能由宿主来给。
             cx.emit(EditTableEvent::FindRequested);
         } else {
-            self.find_panel.update(cx, |panel, cx| panel.focus(window, cx));
+            self.find_panel
+                .update(cx, |panel, cx| panel.focus(window, cx));
         }
         cx.notify();
     }
@@ -1330,7 +1331,8 @@ where
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find_open = false;
         self.find_query.clear();
-        self.find_panel.update(cx, |panel, cx| panel.clear(window, cx));
+        self.find_panel
+            .update(cx, |panel, cx| panel.clear(window, cx));
         self.clear_find_state();
         self.focus_handle.focus(window, cx);
         cx.emit(EditTableEvent::FindStateChanged);
@@ -1488,8 +1490,9 @@ where
         let query = self.find_query.clone();
         if !self.delegate.find_in_table_enabled(cx) || query.is_empty() {
             // 空查询不必扫全表，直接回到「没有命中」的状态。
-            self.find_panel
-                .update(cx, |panel, cx| panel.set_outcome(FindOutcome::default(), cx));
+            self.find_panel.update(cx, |panel, cx| {
+                panel.set_outcome(FindOutcome::default(), cx)
+            });
             cx.emit(EditTableEvent::FindStateChanged);
             cx.notify();
             return;
@@ -1900,7 +1903,12 @@ where
         self.find_previous(cx);
     }
 
-    pub(super) fn action_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn action_cancel(
+        &mut self,
+        _: &Cancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 查找面板优先吃掉 Escape：先关查找，再退回到清除选区。
         if self.find_panel_visible(cx) {
             self.close_find(window, cx);
@@ -2934,7 +2942,11 @@ where
             return div().into_any_element();
         }
 
-        let row_number_offset = if self.delegate.row_number_enabled(cx) { 1 } else { 0 };
+        let row_number_offset = if self.delegate.row_number_enabled(cx) {
+            1
+        } else {
+            0
+        };
         if col_ix < row_number_offset {
             return div().into_any_element();
         }
@@ -4232,14 +4244,7 @@ where
                 |_, _, _, _| {},
             ))
             .when_some(find_panel, |this, panel| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_1()
-                        .right_3()
-                        .occlude()
-                        .child(panel),
-                )
+                this.child(div().absolute().top_1().right_3().occlude().child(panel))
             })
             .when(!window.is_inspector_picking(cx), |this| {
                 this.child(

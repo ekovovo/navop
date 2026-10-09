@@ -325,9 +325,8 @@ impl WebDavSyncStore {
             // 首次使用时还没有索引，视为空索引。
             return Ok(WebDavSyncIndex::default());
         };
-        serde_json::from_slice(&bytes).map_err(|error| {
-            SyncStoreError::Parse(format!("{INDEX_FILE} 解析失败: {error}"))
-        })
+        serde_json::from_slice(&bytes)
+            .map_err(|error| SyncStoreError::Parse(format!("{INDEX_FILE} 解析失败: {error}")))
     }
 
     /// 读远端锁文件；文件不存在时返回 `None`。
@@ -371,9 +370,8 @@ impl WebDavSyncStore {
             last_error = self.ensure_success(&reply).err();
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            SyncStoreError::Io(format!("写入 {INDEX_FILE} 失败且原因未知"))
-        }))
+        Err(last_error
+            .unwrap_or_else(|| SyncStoreError::Io(format!("写入 {INDEX_FILE} 失败且原因未知"))))
     }
 
     // ------------------------------------------------------------------
@@ -383,8 +381,8 @@ impl WebDavSyncStore {
     async fn ensure_manifest(&self) -> Result<(), SyncStoreError> {
         match self.download(MANIFEST_FILE).await? {
             Some(bytes) => {
-                let manifest: PersonalSyncManifest = serde_json::from_slice(&bytes)
-                    .map_err(|error| {
+                let manifest: PersonalSyncManifest =
+                    serde_json::from_slice(&bytes).map_err(|error| {
                         SyncStoreError::Parse(format!("{MANIFEST_FILE} 解析失败: {error}"))
                     })?;
                 manifest.validate()
@@ -496,9 +494,7 @@ impl PersonalSyncStore for WebDavSyncStore {
             .records
             .get(&key)
             .map(|entry| entry.version)
-            .ok_or_else(|| {
-                SyncStoreError::Conflict(format!("missing {data_type} record {id}"))
-            })?;
+            .ok_or_else(|| SyncStoreError::Conflict(format!("missing {data_type} record {id}")))?;
 
         if let Some(expected) = expected_version {
             if current_version != expected {
@@ -509,9 +505,10 @@ impl PersonalSyncStore for WebDavSyncStore {
         }
 
         let file_name = record_file_name(data_type, id);
-        let bytes = self.download(&file_name).await?.ok_or_else(|| {
-            SyncStoreError::Conflict(format!("missing {data_type} record {id}"))
-        })?;
+        let bytes = self
+            .download(&file_name)
+            .await?
+            .ok_or_else(|| SyncStoreError::Conflict(format!("missing {data_type} record {id}")))?;
         let mut record: CloudSyncData = serde_json::from_slice(&bytes)?;
 
         let deleted_at = now_millis();
@@ -746,8 +743,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use futures::future::BoxFuture;
     use futures::FutureExt;
+    use futures::future::BoxFuture;
     use gpui::http_client::{AsyncBody, HttpClient, Request, Response, StatusCode, Url};
 
     use super::{
@@ -817,7 +814,11 @@ mod tests {
         }
 
         fn collection_exists(&self) -> bool {
-            !self.collections.lock().expect("collections lock").is_empty()
+            !self
+                .collections
+                .lock()
+                .expect("collections lock")
+                .is_empty()
         }
 
         fn count(&self) -> usize {
@@ -1275,10 +1276,7 @@ mod tests {
             .upsert_record(&record_for("cloud-1"), None)
             .await
             .expect("upsert");
-        store
-            .list_records(None, None)
-            .await
-            .expect("list");
+        store.list_records(None, None).await.expect("list");
         // 互斥锁也只用基础方法：获取是 GET + PUT，释放是 GET + PUT（**刻意不用
         // DELETE** / PROPFIND —— 部分服务端会 405 或不支持）。
         let lock = store
@@ -1328,7 +1326,10 @@ mod tests {
         let methods = server.methods_seen();
         assert_eq!(
             1,
-            methods.iter().filter(|method| method.as_str() == "MKCOL").count(),
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "MKCOL")
+                .count(),
             "集合已就绪后不应重复发 MKCOL，实际方法序列：{methods:?}"
         );
     }
@@ -1342,7 +1343,10 @@ mod tests {
         match result {
             Err(SyncStoreError::DirectoryUnavailable(message)) => {
                 assert!(message.contains("目标目录不存在"), "message: {message}");
-                assert!(message.contains("创建"), "提示应告诉用户怎么建目录：{message}");
+                assert!(
+                    message.contains("创建"),
+                    "提示应告诉用户怎么建目录：{message}"
+                );
             }
             other => panic!("期望 DirectoryUnavailable，实际为 {other:?}"),
         }
@@ -1364,12 +1368,16 @@ mod tests {
 
         assert_eq!(2, server.record_count());
         let index = server.index();
-        assert!(index
-            .records
-            .contains_key(&entry_key(data_type::CONNECTION, "cloud-1")));
-        assert!(index
-            .records
-            .contains_key(&entry_key(data_type::CREDENTIAL, "cred-1")));
+        assert!(
+            index
+                .records
+                .contains_key(&entry_key(data_type::CONNECTION, "cloud-1"))
+        );
+        assert!(
+            index
+                .records
+                .contains_key(&entry_key(data_type::CREDENTIAL, "cred-1"))
+        );
         // manifest + index + 两条记录
         assert_eq!(4, server.count());
     }
