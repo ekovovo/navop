@@ -337,6 +337,8 @@ pub struct TerminalView {
     autocomplete_enabled: bool,
     /// 是否显示弹框候选词
     suggestion_popup_enabled: bool,
+    /// 命令提示 / cd 补全 / 历史搜索下拉弹层的背景不透明度
+    suggestion_popup_opacity: f32,
     /// 中键粘贴
     middle_click_paste: bool,
     /// 右键快速粘贴

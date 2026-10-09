@@ -1,4 +1,5 @@
 use super::*;
+use one_core::settings::AppSettings;
 
 impl TerminalView {
     pub fn sync_sidebar_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -69,6 +70,17 @@ impl TerminalView {
         }
         let _ = update_settings(cx, move |settings| {
             settings.show_suggestion_popup = enabled;
+        });
+    }
+
+    /// 设置命令提示 / cd 补全 / 历史搜索下拉弹层的背景不透明度（issue #73）。
+    pub fn set_suggestion_popup_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let opacity = AppSettings::normalize_terminal_suggestion_popup_opacity(opacity);
+        if self.suggestion_popup_opacity == opacity {
+            return;
+        }
+        let _ = update_settings(cx, move |settings| {
+            settings.suggestion_popup_opacity = opacity;
         });
     }
 

@@ -88,6 +88,7 @@ impl TerminalView {
                         .rounded_md()
                         .bg(history_prompt_dropdown_background(
                             self.current_theme.background,
+                            self.suggestion_popup_opacity,
                         ))
                         .border_1()
                         .border_color(self.current_theme.foreground.opacity(0.18))

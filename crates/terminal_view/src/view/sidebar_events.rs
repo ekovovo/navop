@@ -306,6 +306,9 @@ impl TerminalView {
             TerminalSidebarEvent::SuggestionPopupChanged(enabled) => {
                 self.apply_suggestion_popup_enabled(*enabled, cx);
             }
+            TerminalSidebarEvent::SuggestionPopupOpacityChanged(opacity) => {
+                self.set_suggestion_popup_opacity(*opacity, cx);
+            }
             TerminalSidebarEvent::MiddleClickPasteChanged(enabled) => {
                 self.set_middle_click_paste(*enabled, cx);
             }

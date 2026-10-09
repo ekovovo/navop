@@ -1,5 +1,6 @@
 use alacritty_terminal::term::TermMode;
 use gpui::{Bounds, Hsla, Keystroke, MouseButton, Pixels, Point, px};
+use one_core::settings::AppSettings;
 use one_core::storage::TerminalHistoryScope;
 use terminal::terminal::{TerminalConnectionKind, TerminalModelEvent};
 
@@ -114,11 +115,6 @@ pub(super) const HISTORY_PROMPT_DROPDOWN_MAX_WIDTH: f32 = 500.0;
 /// 浮层高度上限：cd 补全可能一次返回上百个目录，必须封顶并滚动，
 /// 否则 origin 计算会被撑满终端整窗。
 pub(super) const HISTORY_PROMPT_DROPDOWN_MAX_HEIGHT: f32 = 280.0;
-// 弹层背景画在终端内容之上，下层文字以 (1 - α) 的权重透进弹层。0.72（issue #5
-// 时代为「不遮挡终端内容」调低）会透出 28%，与弹层自身文字的对比度同量级，
-// 亮色主题下选中项几乎不可读（issue #73）。0.96 把透出压到 4%、文字恢复可读，
-// 同时保留一点下层内容的痕迹，不回到 #5 抱怨的完全遮挡观感。
-const HISTORY_PROMPT_DROPDOWN_BACKGROUND_OPACITY: f32 = 0.96;
 const HISTORY_PROMPT_ACTIVE_BACKGROUND_OPACITY: f32 = 0.32;
 const HISTORY_PROMPT_DROPDOWN_GAP_Y: f32 = 6.0;
 const HISTORY_PROMPT_DROPDOWN_EDGE_PADDING: f32 = 8.0;
@@ -129,8 +125,15 @@ pub(super) const HISTORY_PROMPT_DROPDOWN_ROW_GAP: f32 = 4.0;
 pub(super) const HISTORY_PROMPT_DROPDOWN_BORDER_Y: f32 = 2.0;
 const HISTORY_PROMPT_DROPDOWN_INPUT_CLEARANCE: f32 = 8.0;
 
-pub(super) fn history_prompt_dropdown_background(background: Hsla) -> Hsla {
-    background.opacity(HISTORY_PROMPT_DROPDOWN_BACKGROUND_OPACITY)
+/// 弹层背景：画在终端内容之上，下层文字以 (1 - α) 的权重透进弹层。
+///
+/// α 由用户设置 `terminal_suggestion_popup_opacity` 驱动。这里原本写死成常量，
+/// 但那是一对相反诉求僵持的结果：issue #5 嫌「背景遮挡终端内容」把它从 0.88
+/// 调低到 0.72，而 0.72 透出 28%，与弹层自身文字的对比度同量级，亮色主题下整层
+/// 几乎不可读（issue #73）。两个诉求无法用一个常数同时满足，因此改为用户可配
+/// （默认 0.96，透出 4%），本函数只负责把传入值夹到合法区间。
+pub(super) fn history_prompt_dropdown_background(background: Hsla, opacity: f32) -> Hsla {
+    background.opacity(AppSettings::normalize_terminal_suggestion_popup_opacity(opacity))
 }
 
 pub(super) fn history_prompt_active_background(foreground: Hsla) -> Hsla {
@@ -208,20 +211,46 @@ mod tests {
         history_prompt_active_background, history_prompt_dropdown_background,
     };
     use gpui::{Hsla, px, rgb};
+    use one_core::settings::AppSettings;
 
     #[test]
-    fn history_prompt_dropdown_background_limits_bleed_through_to_readable_levels() {
-        // issue #73：下层文字以 (1 - α) 的权重透进弹层。0.72 时代透出 28%，
-        // 与弹层自身文字的对比度同量级，亮色主题下几乎不可读；0.96 把透出压到
-        // 4%。不上调到 1.0：保留少量下层痕迹，不回到 issue #5 抱怨的完全遮挡。
+    fn history_prompt_dropdown_background_applies_requested_opacity() {
+        // issue #73：下层文字以 (1 - α) 的权重透进弹层。α 现在由用户设置驱动，
+        // 但 helper 仍必须只改 alpha、保住 h/s/l（否则主题色会被顺手改掉），
+        // 并且把越界值夹回合法区间。
         let background: Hsla = rgb(0xFAFAFA).into();
 
-        let dropdown = history_prompt_dropdown_background(background);
+        let dropdown = history_prompt_dropdown_background(background, 0.96);
 
         assert_eq!(background.h, dropdown.h);
         assert_eq!(background.s, dropdown.s);
         assert_eq!(background.l, dropdown.l);
         assert!((dropdown.a - 0.96).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn history_prompt_dropdown_background_clamps_out_of_range_opacity() {
+        let background: Hsla = rgb(0xFAFAFA).into();
+
+        // 手改 settings.json 塞进来的越界值不能把弹层变成全透明（读不了）
+        // 或全不透明（回到 issue #5 的遮挡）。
+        let too_transparent = history_prompt_dropdown_background(background, 0.05);
+        assert!(
+            (too_transparent.a - AppSettings::MIN_TERMINAL_SUGGESTION_POPUP_OPACITY).abs()
+                < f32::EPSILON
+        );
+
+        let too_opaque = history_prompt_dropdown_background(background, 3.0);
+        assert!(
+            (too_opaque.a - AppSettings::MAX_TERMINAL_SUGGESTION_POPUP_OPACITY).abs()
+                < f32::EPSILON
+        );
+
+        let not_a_number = history_prompt_dropdown_background(background, f32::NAN);
+        assert!(
+            (not_a_number.a - AppSettings::DEFAULT_TERMINAL_SUGGESTION_POPUP_OPACITY).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
