@@ -4806,13 +4806,12 @@ impl FileManagerPanel {
     /// 显性化，用户才不会把堡垒机的目录误当成内层主机的；要浏览内层主机，就在这里
     /// 选一台已保存的连接（例如配好跳板机的那台）。
     fn render_target_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 宽度上限：连接名再长也不许挤掉右侧的路径栏。名字按可用宽度省略而不是
-        // 按字符数截断——同一个上限对中英文名一视同仁，也不受字体影响。
-        const TARGET_PICKER_MAX_WIDTH: f32 = 132.;
-
-        let name = SharedString::from(self.stored_connection.name.clone());
+        // 连接名只显示前两个字符，其余用 `...` 省略：带环境后缀的长名字会把右侧
+        // 路径栏挤没。截断规则与 SFTP 端点切换按钮共用 `one_ui::short_label`，
+        // 宽度上限只作兜底。
+        let full_name = self.stored_connection.name.clone();
         // 省略号只说明「还有」，截掉的部分只能靠 tooltip 补上。
-        let tooltip = format!("{name} · {}", t!("FileManager.target_tooltip"));
+        let tooltip = format!("{full_name} · {}", t!("FileManager.target_tooltip"));
 
         Button::new("fm-target")
             // 同 `icon_button_variant` 的说明：ghost 变体的前景/悬停背景读全局
@@ -4821,8 +4820,8 @@ impl FileManagerPanel {
             .small()
             .compact()
             .icon(IconName::Server)
-            .label(name)
-            .max_w(px(TARGET_PICKER_MAX_WIDTH))
+            .label(one_ui::short_label(&full_name))
+            .max_w(px(one_ui::SHORT_LABEL_MAX_WIDTH))
             .tooltip(tooltip)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.open_target_picker(window, cx);
@@ -6454,7 +6453,8 @@ mod tests {
         );
     }
 
-    /// 目标选择器不按字符数截断：名字交给按钮按可用宽度省略，全名进 tooltip。
+    /// 目标选择器只展示短标签（`one_ui::short_label`），完整连接名进 tooltip；
+    /// 另留一个宽度上限兜底，免得异常宽字形把右侧路径栏挤走。
     #[test]
     fn target_picker_caps_its_width_and_keeps_the_full_name_in_the_tooltip() {
         let source = include_str!("file_manager_panel.rs");
@@ -6464,9 +6464,9 @@ mod tests {
             .and_then(|source| source.split("fn open_target_picker").next())
             .expect("target picker source");
 
-        assert!(picker.contains(".max_w(px(TARGET_PICKER_MAX_WIDTH))"));
-        assert!(picker.contains(".label(name)"));
-        assert!(picker.contains(r#"let tooltip = format!("{name} · {}""#));
+        assert!(picker.contains(".max_w(px(one_ui::SHORT_LABEL_MAX_WIDTH))"));
+        assert!(picker.contains(".label(one_ui::short_label(&full_name))"));
+        assert!(picker.contains(r#"let tooltip = format!("{full_name} · {}""#));
         assert!(picker.contains(r#"t!("FileManager.target_tooltip")"#));
     }
 
@@ -7263,6 +7263,24 @@ mod tests {
             .find("\n    fn ")
             .expect("render_toolbar 之后的同级函数");
         &rest[..end]
+    }
+
+    /// 目标选择器只展示连接名前两个字符，且必须走共享的短标签截断——
+    /// 否则又会出现「长连接名挤掉右侧路径栏」的回归。
+    #[test]
+    fn target_picker_uses_shared_short_label() {
+        let source = include_str!("file_manager_panel.rs");
+        let start = source
+            .find("fn render_target_picker")
+            .expect("render_target_picker 定义");
+        let rest = &source[start..];
+        let end = rest
+            .find("\n    fn ")
+            .expect("render_target_picker 之后的同级函数");
+        let body = &rest[..end];
+
+        assert!(body.contains("one_ui::short_label"));
+        assert!(body.contains("one_ui::SHORT_LABEL_MAX_WIDTH"));
     }
 
     #[test]

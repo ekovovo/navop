@@ -129,11 +129,14 @@ fn insert_subtree(nodes: &mut HashMap<String, DbNode>, node: &DbNode) {
 /// 而不是在刷新一开始就清掉：提前清空会让这个节点——以及搜索/过滤命中它子节点的
 /// 分支——在刷新期间从界面上消失一下，等懒加载回来才重新长出来（issue #362）。
 /// 先删后挂也保证被替换掉的旧节点不会留在 `db_nodes` 里变成走不到的孤儿。
+/// 返回值是**新子树里仍处于「未加载」状态的节点 id**，调用方应据此清掉自己的
+/// 「已加载」记忆。否则懒加载的节点（如表下的索引 / 外键文件夹）在刷新后，会带着
+/// 旧的「已加载」标记被换成空节点，于是再也查不出来，一直显示为空白。
 fn install_loaded_children(
     nodes: &mut HashMap<String, DbNode>,
     node_id: &str,
     children: &[DbNode],
-) {
+) -> Vec<String> {
     remove_descendants(nodes, node_id);
     if let Some(node) = nodes.get_mut(node_id) {
         node.children = children.to_vec();
@@ -141,6 +144,20 @@ fn install_loaded_children(
     }
     for child in children {
         insert_subtree(nodes, child);
+    }
+
+    let mut unloaded = Vec::new();
+    collect_unloaded_node_ids(children, &mut unloaded);
+    unloaded
+}
+
+/// 收集子树里 `children_loaded == false` 的节点 id（含嵌套层级）。
+fn collect_unloaded_node_ids(nodes: &[DbNode], out: &mut Vec<String>) {
+    for node in nodes {
+        if !node.children_loaded {
+            out.push(node.id.clone());
+        }
+        collect_unloaded_node_ids(&node.children, out);
     }
 }
 
@@ -1731,6 +1748,16 @@ impl DbTreeView {
         self.error_nodes.remove(node_id);
     }
 
+    /// 把「新子树里仍未加载」的节点从已加载记忆里剔除。
+    ///
+    /// 刷新会整体换掉子树，新数据里仍是懒加载状态的节点（表下的索引 / 外键文件夹等）
+    /// 必须重新可查，否则会被 `lazy_load_children` 当成已加载直接跳过，一直是空的。
+    fn forget_unloaded_nodes(&mut self, unloaded_ids: &[String]) {
+        for unloaded_id in unloaded_ids {
+            self.loaded_children.remove(unloaded_id);
+        }
+    }
+
     /// 清理节点的所有状态（包含展开状态）
     fn clear_node_all_state(&mut self, node_id: &str) {
         self.clear_node_loading_state(node_id);
@@ -1856,7 +1883,11 @@ impl DbTreeView {
 
                         // 新数据到达：用它整体替换这个节点的子树，顺带回收被替换掉的旧后代。
                         // 替换发生在这里（而不是刷新发起时），所以刷新期间界面一直有内容显示。
-                        install_loaded_children(&mut this.db_nodes, &clone_node_id, &children);
+                        let unloaded_ids =
+                            install_loaded_children(&mut this.db_nodes, &clone_node_id, &children);
+                        // 新子树里没加载过的节点不能再算「已加载」：否则刷新之后展开它们时
+                        // 会被 `lazy_load_children` 直接跳过，永远停在空白状态。
+                        this.forget_unloaded_nodes(&unloaded_ids);
                         for child in &children {
                             trace!("DbTreeView lazy_load_children: adding child: {} (type: {:?})", child.id, child.node_type);
                         }
@@ -3812,6 +3843,57 @@ mod tests {
         // 替换只发生在这一棵子树内，连接与库不受影响。
         assert!(nodes.contains_key("conn-1"));
         assert!(nodes.contains_key("db-app"));
+    }
+
+    /// 刷新换掉子树后，新子树里「未加载」的节点必须被报告出来。
+    ///
+    /// 表展开现在只带列目录，索引 / 外键目录是懒加载的空节点；刷新后必须能认出
+    /// 它们「还没加载」，否则会被当成已加载跳过，永久显示空白。
+    #[test]
+    fn install_loaded_children_reports_deferred_nodes_as_unloaded() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "node-orders".to_string(),
+            build_node(DbNodeType::Table, "orders", &[]),
+        );
+
+        let columns_folder =
+            build_node(DbNodeType::ColumnsFolder, "columns_folder", &[]).with_children_loaded(true);
+        let indexes_folder = build_node(DbNodeType::IndexesFolder, "indexes_folder", &[]);
+
+        let unloaded =
+            install_loaded_children(&mut nodes, "node-orders", &[columns_folder, indexes_folder]);
+
+        assert_eq!(
+            vec!["node-indexes_folder".to_string()],
+            unloaded,
+            "已加载的列目录不该被报告，未加载的索引目录必须被报告"
+        );
+    }
+
+    /// 报告出来的未加载节点要真的把「已加载」记忆清掉，已加载的则不受影响。
+    #[gpui::test]
+    fn forgetting_unloaded_nodes_only_drops_their_loaded_memory(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(GlobalDbState::default()));
+        let (view, visual) = search_fixture_view(cx);
+
+        visual.update(|_window, cx| {
+            view.update(cx, |view, _cx| {
+                view.loaded_children.insert("kept".to_string());
+                view.loaded_children.insert("stale".to_string());
+
+                view.forget_unloaded_nodes(&["stale".to_string()]);
+
+                assert!(
+                    view.loaded_children.contains("kept"),
+                    "已加载的节点不该被顺手清掉，否则每次刷新都会白跑一遍请求"
+                );
+                assert!(
+                    !view.loaded_children.contains("stale"),
+                    "新子树里未加载的节点必须重新变得可查"
+                );
+            });
+        });
     }
 
     /// 递归回收必须一路挖到孙辈，同时保留节点自己。

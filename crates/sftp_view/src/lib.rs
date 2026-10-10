@@ -6690,11 +6690,11 @@ impl SftpView {
                             ))
                             .child(
                                 div()
-                                    .max_w(px(96.))
+                                    .max_w(px(one_ui::SHORT_LABEL_MAX_WIDTH))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .child(left_endpoint_title),
+                                    .child(one_ui::short_label(&left_endpoint_title)),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_left_endpoint_switcher(window, cx);
@@ -7730,6 +7730,23 @@ mod tests {
     fn root_breadcrumb_does_not_reserve_regular_item_width() {
         assert_eq!(breadcrumb_item_min_width("/"), 0.);
         assert_eq!(breadcrumb_item_min_width("home"), 35.);
+    }
+
+    /// 端点切换按钮的标题必须走共享的短标签截断，否则又会把面包屑挤窄。
+    #[test]
+    fn endpoint_switcher_uses_shared_short_label() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn render_local_panel")
+            .expect("render_local_panel 定义");
+        let rest = &source[start..];
+        let end = rest
+            .find("\n    fn ")
+            .expect("render_local_panel 之后的同级函数");
+        let body = &rest[..end];
+
+        assert!(body.contains("one_ui::short_label"));
+        assert!(body.contains("one_ui::SHORT_LABEL_MAX_WIDTH"));
     }
 
     #[test]
