@@ -3829,6 +3829,52 @@ impl GlobalDbState {
             .await
     }
 
+    /// 导出一张表的建表 DDL——统一入口，与 `list_*_direct` 同构。
+    ///
+    /// DDL 由插件/驱动自己生成（服务器官方 `SHOW CREATE` / `DBMS_METADATA` /
+    /// catalog 原文等）。宿主不做共享兑底拼装：拼出来的结构会丢自增、精度等
+    /// 方言细节，错结构比报错更糟。
+    pub async fn export_table_ddl_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+        table: &str,
+    ) -> anyhow::Result<String> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .export_table_create_sql(conn, database, schema.as_deref(), table)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
     /// Loads schema-compare metadata using one session and one connection.
     pub async fn load_table_metadata_direct(
         &self,

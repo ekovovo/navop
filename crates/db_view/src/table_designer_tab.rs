@@ -175,13 +175,33 @@ pub(crate) fn build_table_design_from_metadata(
     table_info: Option<&TableInfo>,
     plugin: Option<&dyn DatabasePlugin>,
 ) -> TableDesign {
+    // IPC 驱动的 schema/columns 不一定回列级主键（共享 handleSchemaColumns
+    // 不查约束），但 schema/indexes 会标记 PK 索引——从它的成员反推列主键。
+    // 原生插件两条路都有，先到先得，不覆盖已有 true。
+    // Oracle 家族的字典列名全大写，列名可能小写——不区分大小写匹配。
+    let pk_members: std::collections::HashSet<String> = indexes
+        .iter()
+        .filter(|idx| idx.is_primary || idx.name.eq_ignore_ascii_case("PRIMARY"))
+        .flat_map(|idx| idx.columns.iter())
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
+    let columns: Vec<ColumnInfo> = columns
+        .iter()
+        .map(|col| {
+            let mut col = col.clone();
+            if !col.is_primary_key && pk_members.contains(&col.name.to_ascii_uppercase()) {
+                col.is_primary_key = true;
+            }
+            col
+        })
+        .collect();
+    let primary_key_count = columns.iter().filter(|col| col.is_primary_key).count();
     let column_defs: Vec<ColumnDefinition> = columns
         .iter()
         .map(|col| {
             let parsed = plugin
                 .map(|plugin| plugin.parse_column_type(&col.data_type))
                 .unwrap_or_else(|| fallback_parse_column_type(&col.data_type));
-            let primary_key_count = columns.iter().filter(|col| col.is_primary_key).count();
             column_info_to_definition(database_type.clone(), col, parsed, primary_key_count)
         })
         .collect();
@@ -4166,6 +4186,60 @@ mod tests {
 
         assert_eq!(idx, 2);
         assert_eq!(data_types, vec!["INT", "VARCHAR", "jsonb"]);
+    }
+
+    #[test]
+    fn test_build_table_design_derives_primary_key_from_pk_index() {
+        // IPC 驱动的 schema/columns 不回列级主键（is_primary 恒 false），
+        // 设计器必须从 PK 索引成员反推，否则 PRIMARY KEY 整条丢失。
+        let columns = vec![
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: "NUMBER(10)".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+                charset: None,
+                collation: None,
+                is_auto_increment: false,
+            },
+            ColumnInfo {
+                name: "amount".to_string(),
+                data_type: "DECIMAL(10,4)".to_string(),
+                is_nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+                charset: None,
+                collation: None,
+                is_auto_increment: false,
+            },
+        ];
+        let indexes = vec![IndexInfo {
+            name: "PK_ORDERS".to_string(),
+            columns: vec!["ID".to_string()],
+            is_unique: true,
+            is_primary: true,
+            index_type: Some("NORMAL".to_string()),
+        }];
+
+        let design = build_table_design_from_metadata(
+            DatabaseType::Oracle,
+            "app".to_string(),
+            "orders".to_string(),
+            &columns,
+            &indexes,
+            None,
+            None,
+        );
+
+        assert!(design.columns[0].is_primary_key, "id must be primary");
+        assert!(!design.columns[1].is_primary_key, "amount must not be primary");
+        // 精度随 raw_type 走解析链，不能丢。
+        assert_eq!(design.columns[0].length, Some(10));
+        assert_eq!(design.columns[1].length, Some(10));
+        assert_eq!(design.columns[1].scale, Some(4));
     }
 
     #[test]
