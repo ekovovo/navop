@@ -5,18 +5,13 @@
 //! 表选项（ENGINE/CHARSET/COLLATE/COMMENT）都由驱动决定，不再有本地手搓的近似版。
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anyhow::Result;
 use db::GlobalDbState;
-use db::plugin::DatabasePlugin;
-use db::types::{ColumnInfo, IndexInfo, TableInfo};
 use gpui::{AsyncApp, Task};
 use one_core::gpui_tokio::Tokio;
 use one_core::storage::DatabaseType;
 use rust_i18n::t;
-
-use crate::table_designer_tab::{build_table_design_from_metadata, find_loaded_table_info};
 
 /// 快照里一张表/视图的坐标：表名 + 它所在的 database/schema。
 ///
@@ -175,87 +170,27 @@ pub async fn load_ddl_section(
     })
 }
 
-/// 与表设计器预览完全相同的链路：
-/// 列/索引/表信息 → `TableDesign` → 驱动建表 SQL。
+/// 统一 DDL 入口：直接向插件/驱动要建表 DDL（服务器官方 `SHOW CREATE` /
+/// `DBMS_METADATA` / catalog 原文等，由各方首自己生成）。
+/// 不再本地拼装——拼出来的结构会丢自增/精度等方言细节。
 async fn fetch_driven_ddl(
     cx: &mut AsyncApp,
     global_state: &GlobalDbState,
     target: &TableDdlTarget,
 ) -> Result<String> {
-    let metadata = Tokio::spawn_result(
-        cx,
-        load_table_metadata(global_state.clone(), target.clone()),
-    )
-    .await?;
-    let design = build_table_design_from_metadata(
-        target.database_type.clone(),
-        target.database.clone(),
-        target.name.clone(),
-        &metadata.columns,
-        &metadata.indexes,
-        metadata.table_info.as_ref(),
-        metadata.plugin.as_deref(),
-    );
-    global_state
-        .build_table_design_sql(
-            cx,
-            target.connection_id.clone(),
-            target.database.clone(),
-            target.schema.clone(),
-            None,
-            design,
-            Vec::new(),
-        )
-        .await
-}
-
-/// 表结构元数据（列 + 索引 + 表信息 + 方言插件）。
-struct TableMetadata {
-    columns: Vec<ColumnInfo>,
-    indexes: Vec<IndexInfo>,
-    table_info: Option<TableInfo>,
-    plugin: Option<Arc<dyn DatabasePlugin>>,
-}
-
-/// 与表设计器加载表结构用的是同一组查询，`list_*_direct` 要求跑在 Tokio runtime 里。
-async fn load_table_metadata(
-    global_state: GlobalDbState,
-    target: TableDdlTarget,
-) -> Result<TableMetadata> {
-    let columns = global_state
-        .list_columns_direct(
-            &target.connection_id,
-            &target.database,
-            target.schema.clone(),
-            &target.name,
-        )
-        .await?;
-    let indexes = global_state
-        .list_indexes_direct(
-            &target.connection_id,
-            &target.database,
-            target.schema.clone(),
-            &target.name,
-        )
-        .await?;
-    let tables = global_state
-        .list_tables_direct(
-            &target.connection_id,
-            &target.database,
-            target.schema.clone(),
-        )
-        .await?;
-    let plugin = global_state
-        .db_manager
-        .get_plugin(&target.database_type)
-        .ok();
-    Ok(TableMetadata {
-        columns,
-        indexes,
-        // 表注释会进建表 DDL（MySQL 的 COMMENT=），所以按表名取回 TableInfo。
-        table_info: find_loaded_table_info(tables, &target.name, target.schema.as_deref()),
-        plugin,
+    let global_state = global_state.clone();
+    let target = target.clone();
+    Tokio::spawn_result(cx, async move {
+        global_state
+            .export_table_ddl_direct(
+                &target.connection_id,
+                &target.database,
+                target.schema.clone(),
+                &target.name,
+            )
+            .await
     })
+    .await
 }
 
 #[cfg(test)]

@@ -27,7 +27,7 @@ use crate::sqlite::SqlitePlugin;
 use crate::ssh_tunnel::resolve_connection_target;
 use crate::streaming_parser::StreamingSqlParser;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use extension_protocol::{
     conn::ConnTestResult, ddl as wire_ddl, method as wire_method, schema as wire_schema,
@@ -1937,10 +1937,13 @@ impl DatabasePlugin for ExternalDatabasePlugin {
         crate::ipc::export::export_data_with_progress(self, connection, config, progress_tx).await
     }
 
-    /// Prefer the driver's `schema/dump_ddl` result for structure export, falling
-    /// back to the generic column-based builder whenever the driver does not
-    /// implement the method, returns nothing, or the underlying DDL provider is
-    /// unavailable on the server (e.g. the GBase 8s `get_ddl` SPL recipe).
+    /// Structure export must come from the driver's `schema/dump_ddl` whenever
+    /// the method is declared: the driver speaks the server dialect (identity
+    /// columns, precision/scale, storage options) while the shared column-based
+    /// builder provably drops them, silently exporting a wrong structure. So a
+    /// declared-but-failing, empty, or comment-only dump is an error — never a
+    /// reason to fall back and fabricate DDL the server would not recognize.
+    /// Drivers without the method keep the shared builder as their only path.
     async fn export_table_create_sql(
         &self,
         connection: &dyn DbConnection,
@@ -1975,33 +1978,43 @@ impl DatabasePlugin for ExternalDatabasePlugin {
                     wire_method::SCHEMA_DUMP_DDL,
                     params,
                 )
-                .await;
-            if let Ok(result) = dump {
-                // Only trust statements that actually carry DDL. Some drivers
-                // (e.g. openGauss) reply to `schema/dump_ddl` for tables with a
-                // placeholder comment when they have no server-side provider;
-                // treating that as real output would replace the exported
-                // structure with a useless comment, so drop comment-only
-                // statements and fall back to the generic builder.
-                let real: Vec<String> = result
-                    .statements
-                    .into_iter()
-                    .filter(|statement| dump_statement_has_ddl(statement))
-                    .collect();
-                let joined = real.join("\n");
-                // The exporter appends `;` after the returned string, so strip
-                // trailing terminators/whitespace to avoid a double semicolon.
-                let joined = joined.trim_end().trim_end_matches(';').trim_end();
-                if !joined.is_empty() {
-                    return Ok(joined.to_string());
-                }
+                .await
+                .context("driver schema/dump_ddl failed")?;
+            // Only statements that actually carry DDL count. Some drivers
+            // (e.g. openGauss) used to reply with a placeholder comment when
+            // they had no server-side provider; fabricating a replacement from
+            // the shared builder would export a wrong structure, so a
+            // comment-only or empty result is an error, not a fallback.
+            let real: Vec<String> = dump
+                .statements
+                .into_iter()
+                .filter(|statement| dump_statement_has_ddl(statement))
+                .collect();
+            if real.is_empty() {
+                anyhow::bail!(
+                    "driver schema/dump_ddl returned no DDL for table {table}; \
+                     refusing to replace the structure with the shared column \
+                     builder because it would drop identity/precision details"
+                );
             }
+            let joined = real.join("\n");
+            // The exporter appends `;` after the returned string, so strip
+            // trailing terminators/whitespace to avoid a double semicolon.
+            let joined = joined.trim_end().trim_end_matches(';').trim_end();
+            anyhow::ensure!(
+                !joined.is_empty(),
+                "driver schema/dump_ddl returned no DDL for table {table}"
+            );
+            return Ok(joined.to_string());
         }
-        // Call the shared generic builder directly: a `DatabasePlugin::method`
-        // dispatch from inside an override would resolve back to this override
-        // and recurse, so opt into the default body via the free function.
-        crate::plugin::default_export_table_create_sql(self, connection, database, schema, table)
-            .await
+        // Drivers without the method declared hit the trait default, which
+        // now errors: there is deliberately no shared fallback builder
+        // because it fabricated lossy DDL (dropped identity/precision).
+        anyhow::bail!(
+            "external driver `{}` does not declare `schema/dump_ddl`; \
+             DDL export requires a driver-side implementation",
+            self.driver.id
+        )
     }
 }
 
@@ -3673,18 +3686,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_export_table_create_sql_includes_primary_key_and_comments() {
+    async fn export_table_create_sql_errors_without_dump_ddl_declaration() {
         let plugin = ExternalDatabasePlugin::new();
         let connection = ExportDdlConnection::new();
 
-        let ddl = plugin
+        let error = plugin
             .export_table_create_sql(&connection, "main", None, "events")
             .await
-            .expect("default export_table_create_sql should succeed");
+            .expect_err("no shared fallback builder: undeclared drivers must error");
 
-        assert_eq!(
-            "CREATE TABLE \"events\" (\n    \"id\" INTEGER NOT NULL,\n    \"name\" VARCHAR(64),\n    PRIMARY KEY (\"id\")\n)\nCOMMENT ON TABLE \"events\" IS 'event stream';\nCOMMENT ON COLUMN \"events\".\"id\" IS 'event id';\nCOMMENT ON COLUMN \"events\".\"name\" IS 'customer name'",
-            ddl
+        assert!(
+            error.to_string().contains("schema/dump_ddl"),
+            "error should name the missing driver method: {error}"
         );
     }
 
@@ -3720,40 +3733,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_table_create_sql_falls_back_when_dump_ddl_returns_nothing() {
+    async fn export_table_create_sql_errors_when_dump_ddl_returns_nothing() {
         let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
         driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
         let plugin = ExternalDatabasePlugin::for_driver(driver);
         let connection = DumpDdlConnection::with_empty_dump(true);
 
-        let ddl = plugin
+        let error = plugin
             .export_table_create_sql(&connection, "main", None, "events")
             .await
-            .expect("empty dump_ddl should fall back to the default builder");
+            .expect_err("empty dump_ddl must error instead of fabricating DDL");
 
-        assert_eq!(
-            "CREATE TABLE \"events\" (\n    \"id\" INTEGER NOT NULL,\n    \"name\" VARCHAR(64),\n    PRIMARY KEY (\"id\")\n)\nCOMMENT ON TABLE \"events\" IS 'event stream';\nCOMMENT ON COLUMN \"events\".\"id\" IS 'event id';\nCOMMENT ON COLUMN \"events\".\"name\" IS 'customer name'",
-            ddl
+        // The driver declared schema/dump_ddl, so the shared column builder
+        // must never run: it drops identity/precision details and would
+        // silently export a wrong structure.
+        assert!(
+            error.to_string().contains("schema/dump_ddl"),
+            "error should point at the driver dump: {error}"
         );
     }
 
     #[tokio::test]
-    async fn export_table_create_sql_falls_back_when_dump_ddl_is_comment_only() {
+    async fn export_table_create_sql_errors_when_dump_ddl_is_comment_only() {
         let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
         driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
         let plugin = ExternalDatabasePlugin::for_driver(driver);
         let connection = DumpDdlConnection::with_comment_only_dump(true);
 
-        let ddl = plugin
+        let error = plugin
             .export_table_create_sql(&connection, "main", None, "events")
             .await
-            .expect("comment-only dump_ddl should fall back to the default builder");
+            .expect_err("comment-only dump_ddl must error instead of fabricating DDL");
 
         assert!(
-            ddl.starts_with("CREATE TABLE \"events\""),
-            "comment-only dump_ddl must not replace the exported structure with a comment"
+            error.to_string().contains("schema/dump_ddl"),
+            "error should point at the driver dump: {error}"
         );
-        assert!(ddl.contains("PRIMARY KEY (\"id\")"));
     }
 
     #[tokio::test]
