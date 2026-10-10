@@ -19,6 +19,7 @@ pub mod resize_handle;
 #[cfg(test)]
 mod resize_handle_tests;
 mod settings;
+pub mod short_label;
 pub mod signature_help;
 pub mod status_bar;
 mod time;
@@ -44,6 +45,7 @@ pub use settings::{
     set_table_row_height, table_column_comment_in_header, table_header_height_or, table_row_height,
     table_row_height_or,
 };
+pub use short_label::{SHORT_LABEL_MAX_CHARS, SHORT_LABEL_MAX_WIDTH, short_label};
 pub use signature_help::{ExtendedEditor, ExtendedEditorState, SignatureHelpProvider};
 pub use status_bar::{StatusBar, StatusBarColors, StatusPresentation};
 pub use time::datetime_picker::{DateTimePicker, DateTimePickerEvent, DateTimePickerState};
