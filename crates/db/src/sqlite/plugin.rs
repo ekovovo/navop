@@ -1646,6 +1646,167 @@ mod tests {
         (temp_dir, connection)
     }
 
+    // ==================== 表展开懒加载 ====================
+
+    fn table_node(table: &str) -> DbNode {
+        let mut metadata = HashMap::new();
+        metadata.insert("database".to_string(), "main".to_string());
+        DbNode::new(
+            format!("main:{table}"),
+            table,
+            DbNodeType::Table,
+            "sqlite-plugin-test".to_string(),
+            DatabaseType::SQLite,
+        )
+        .with_metadata(metadata)
+    }
+
+    fn folder_of<'a>(children: &'a [DbNode], ty: &DbNodeType) -> &'a DbNode {
+        children
+            .iter()
+            .find(|child| &child.node_type == ty)
+            .unwrap_or_else(|| panic!("folder {ty:?} should exist"))
+    }
+
+    /// 表展开只应查「字段」：索引 / 外键 / 触发器 / 检查约束必须留成空文件夹，
+    /// 等用户点开才查。
+    ///
+    /// 这里刻意给表建了**非空**的索引与触发器、另建一张带 REFERENCES 的表，
+    /// 否则「没查」与「查了但结果为空」无法区分 —— 实现被改回一次性全查时，
+    /// 用例仍会通过，等于没测住。
+    #[tokio::test]
+    async fn load_table_children_defers_secondary_metadata_to_lazy_folders() {
+        let (_temp_dir, connection) = create_connection().await;
+        connection
+            .query("CREATE TABLE lazy_parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL);")
+            .await
+            .expect("table creation should succeed");
+        connection
+            .query("CREATE INDEX idx_lazy_label ON lazy_parent(label);")
+            .await
+            .expect("index creation should succeed");
+        connection
+            .query("CREATE TRIGGER trg_lazy_parent AFTER INSERT ON lazy_parent BEGIN UPDATE lazy_parent SET label = label WHERE id = NEW.id; END;")
+            .await
+            .expect("trigger creation should succeed");
+        connection
+            .query("CREATE TABLE lazy_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES lazy_parent(id));")
+            .await
+            .expect("child table creation should succeed");
+
+        let plugin = create_plugin();
+        let children = plugin
+            .load_table_children(&connection, &table_node("lazy_parent"), "main:lazy_parent")
+            .await
+            .expect("table children should load");
+
+        let types: Vec<DbNodeType> = children
+            .iter()
+            .map(|child| child.node_type.clone())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                DbNodeType::ColumnsFolder,
+                DbNodeType::IndexesFolder,
+                DbNodeType::ForeignKeysFolder,
+                DbNodeType::TriggersFolder,
+                DbNodeType::ChecksFolder,
+            ],
+            "表展开必须固定给出这 5 个文件夹，顺序稳定"
+        );
+
+        // 列是立即加载的：既有子项，也标记为已加载。
+        let columns = folder_of(&children, &DbNodeType::ColumnsFolder);
+        assert!(columns.children_loaded, "列应随表展开一起加载");
+        assert_eq!(columns.children.len(), 2, "lazy_parent 有 id / label 两列");
+
+        // 其余四类：未加载、无子项，且 metadata 足以支撑点开时的按需查询。
+        for deferred in [
+            DbNodeType::IndexesFolder,
+            DbNodeType::ForeignKeysFolder,
+            DbNodeType::TriggersFolder,
+            DbNodeType::ChecksFolder,
+        ] {
+            let folder = folder_of(&children, &deferred);
+            assert!(
+                !folder.children_loaded,
+                "{deferred:?} 应留待懒加载，不能被表展开顺带查掉"
+            );
+            assert!(
+                folder.children.is_empty(),
+                "{deferred:?} 在展开前不应预置子项"
+            );
+            assert_eq!(
+                folder.get_table_name().as_deref(),
+                Some("lazy_parent"),
+                "{deferred:?} 必须带着表名，否则点开时查不到"
+            );
+            assert_eq!(
+                folder.get_database_name().as_deref(),
+                Some("main"),
+                "{deferred:?} 必须带着库名，否则点开时查不到"
+            );
+        }
+
+        // 有外键的表：外键同样不随表展开加载。
+        let child_children = plugin
+            .load_table_children(&connection, &table_node("lazy_child"), "main:lazy_child")
+            .await
+            .expect("child table children should load");
+        let foreign_keys = folder_of(&child_children, &DbNodeType::ForeignKeysFolder);
+        assert!(
+            !foreign_keys.children_loaded && foreign_keys.children.is_empty(),
+            "有外键的表展开时同样不应查外键"
+        );
+    }
+
+    /// 懒加载路径必须真的取得到数据：点开索引文件夹应查到刚才建的索引。
+    ///
+    /// 只断言「展开表时索引为空」，一个永远返回空的实现也会通过；
+    /// 这条把「延后查询」和「查询丢失」区分开。
+    #[tokio::test]
+    async fn expanding_indexes_folder_queries_indexes_on_demand() {
+        let (_temp_dir, connection) = create_connection().await;
+        connection
+            .query("CREATE TABLE lazy_indexed (id INTEGER PRIMARY KEY, label TEXT NOT NULL);")
+            .await
+            .expect("table creation should succeed");
+        connection
+            .query("CREATE INDEX idx_lazy_indexed_label ON lazy_indexed(label);")
+            .await
+            .expect("index creation should succeed");
+
+        let plugin = create_plugin();
+        let children = plugin
+            .load_table_children(
+                &connection,
+                &table_node("lazy_indexed"),
+                "main:lazy_indexed",
+            )
+            .await
+            .expect("table children should load");
+        let indexes_folder = folder_of(&children, &DbNodeType::IndexesFolder);
+        assert!(
+            indexes_folder.children.is_empty(),
+            "展开表阶段不应已经带上索引"
+        );
+
+        let indexes = plugin
+            .load_table_folder_children(&connection, indexes_folder, &indexes_folder.id)
+            .await
+            .expect("indexes should load on demand");
+
+        assert_eq!(
+            indexes
+                .iter()
+                .map(|index| index.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["idx_lazy_indexed_label"],
+            "点开索引文件夹应查到真实索引"
+        );
+    }
+
     // ==================== Basic Plugin Info Tests ====================
 
     #[test]

@@ -1535,57 +1535,42 @@ ORDER BY name;"#
         let columns = self
             .list_columns(connection, database, schema.clone(), table)
             .await?;
-        children.push(
-            self.build_table_subfolder(
-                node,
-                id,
-                "columns_folder",
-                "DbTree.Columns",
-                DbNodeType::ColumnsFolder,
-                &folder_metadata,
-                columns
-                    .into_iter()
-                    .map(|c| {
-                        (c.name.clone(), DbNodeType::Column, {
-                            let mut metadata = folder_metadata.clone();
-                            metadata.insert("type".to_string(), c.data_type);
-                            metadata.insert("is_nullable".to_string(), c.is_nullable.to_string());
-                            metadata
-                                .insert("is_primary_key".to_string(), c.is_primary_key.to_string());
-                            metadata
-                        })
+        let mut columns_folder = self.build_table_subfolder(
+            node,
+            id,
+            "columns_folder",
+            "DbTree.Columns",
+            DbNodeType::ColumnsFolder,
+            &folder_metadata,
+            columns
+                .into_iter()
+                .map(|c| {
+                    (c.name.clone(), DbNodeType::Column, {
+                        let mut metadata = folder_metadata.clone();
+                        metadata.insert("type".to_string(), c.data_type);
+                        metadata.insert("is_nullable".to_string(), c.is_nullable.to_string());
+                        metadata
+                            .insert("is_primary_key".to_string(), c.is_primary_key.to_string());
+                        metadata
                     })
-                    .collect(),
-            ),
+                })
+                .collect(),
         );
+        // 列已经查过全量：空表也要标记成「已加载」，否则展开一个空文件夹还会再发一次请求。
+        if !columns_folder.children_loaded {
+            columns_folder.set_children(Vec::new());
+        }
+        children.push(columns_folder);
 
-        let indexes: Vec<_> = self
-            .list_indexes(connection, database, schema.clone(), table)
-            .await?
-            .into_iter()
-            .filter(|idx| idx.name.to_uppercase() != "PRIMARY")
-            .collect();
-        children.push(
-            self.build_table_subfolder(
-                node,
-                id,
-                "indexes_folder",
-                "DbTree.Indexes",
-                DbNodeType::IndexesFolder,
-                &folder_metadata,
-                indexes
-                    .into_iter()
-                    .map(|idx| {
-                        (idx.name.clone(), DbNodeType::Index, {
-                            let mut metadata = folder_metadata.clone();
-                            metadata.insert("unique".to_string(), idx.is_unique.to_string());
-                            metadata.insert("columns".to_string(), idx.columns.join(", "));
-                            metadata
-                        })
-                    })
-                    .collect(),
-            ),
-        );
+        // 索引改为懒加载：只建文件夹节点，展开时才查（见 load_table_folder_children）。
+        children.push(self.build_deferred_table_subfolder(
+            node,
+            id,
+            "indexes_folder",
+            "DbTree.Indexes",
+            DbNodeType::IndexesFolder,
+            &folder_metadata,
+        ));
 
         Ok(children)
     }
