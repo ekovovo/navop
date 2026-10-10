@@ -6453,7 +6453,8 @@ mod tests {
         );
     }
 
-    /// 目标选择器不按字符数截断：名字交给按钮按可用宽度省略，全名进 tooltip。
+    /// 目标选择器只展示短标签（`one_ui::short_label`），完整连接名进 tooltip；
+    /// 另留一个宽度上限兜底，免得异常宽字形把右侧路径栏挤走。
     #[test]
     fn target_picker_caps_its_width_and_keeps_the_full_name_in_the_tooltip() {
         let source = include_str!("file_manager_panel.rs");
@@ -6463,9 +6464,9 @@ mod tests {
             .and_then(|source| source.split("fn open_target_picker").next())
             .expect("target picker source");
 
-        assert!(picker.contains(".max_w(px(TARGET_PICKER_MAX_WIDTH))"));
-        assert!(picker.contains(".label(name)"));
-        assert!(picker.contains(r#"let tooltip = format!("{name} · {}""#));
+        assert!(picker.contains(".max_w(px(one_ui::SHORT_LABEL_MAX_WIDTH))"));
+        assert!(picker.contains(".label(one_ui::short_label(&full_name))"));
+        assert!(picker.contains(r#"let tooltip = format!("{full_name} · {}""#));
         assert!(picker.contains(r#"t!("FileManager.target_tooltip")"#));
     }
 
