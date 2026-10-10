@@ -4109,6 +4109,9 @@ impl TabContainer {
 
                         div()
                             .id(SharedString::from(format!("pinned-tab-{pinned_index}")))
+                            .debug_selector(move || {
+                                format!("tab-container.pinned-tab-{pinned_index}")
+                            })
                             .flex()
                             .flex_shrink_0()
                             .overflow_hidden()
@@ -4211,6 +4214,7 @@ impl TabContainer {
                         let closeable = tab.content().closeable(cx);
                         let is_active = self.active_pinned_index.is_none() && idx == active_index;
                         let view_clone = view.clone();
+                        let view_for_middle_close = view.clone();
                         let title_clone = title.clone();
                         let tab_max_width = self.get_tab_max_width(tab, cx);
                         let tab_id = tab.id();
@@ -4230,6 +4234,7 @@ impl TabContainer {
 
                         div()
                             .id(idx)
+                            .debug_selector(move || format!("tab-container.tab-{idx}"))
                             .flex()
                             .relative()
                             .flex_shrink_0()
@@ -4336,6 +4341,15 @@ impl TabContainer {
                                 window.prevent_default();
                                 this.set_active_index(idx, window, cx);
                             }))
+                            // 中键关闭沿用浏览器惯例：悬停标签任意位置即可关闭，不必对准 ×。
+                            // closeable / locked 判断交给 close_tab 自身，避免渲染层重复一套守卫。
+                            .on_mouse_down(MouseButton::Middle, move |_evt, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                view_for_middle_close.update(cx, |this, cx| {
+                                    this.close_tab(idx, window, cx).detach();
+                                });
+                            })
                             .child(render_tab_display_number(display_number, text_color))
                             .when_some(icon, |el, icon| {
                                 el.child(div().flex_shrink_0().flex().items_center().child(icon))
@@ -5026,6 +5040,7 @@ mod tests {
         status: Option<SharedString>,
         lifecycle: Option<Arc<Mutex<Vec<String>>>>,
         presentation_obscured: bool,
+        closeable: bool,
     }
 
     impl TestTab {
@@ -5037,6 +5052,14 @@ mod tests {
                 status: None,
                 lifecycle: None,
                 presentation_obscured: false,
+                closeable: true,
+            }
+        }
+
+        fn uncloseable(title: &'static str, cx: &mut Context<Self>) -> Self {
+            Self {
+                closeable: false,
+                ..Self::new(title, cx)
             }
         }
 
@@ -5052,6 +5075,7 @@ mod tests {
                 status: Some(status.into()),
                 lifecycle: None,
                 presentation_obscured: false,
+                closeable: true,
             }
         }
 
@@ -5067,6 +5091,7 @@ mod tests {
                 status: None,
                 lifecycle: Some(lifecycle),
                 presentation_obscured: false,
+                closeable: true,
             }
         }
 
@@ -5144,6 +5169,10 @@ mod tests {
 
         fn title(&self, _cx: &App) -> SharedString {
             self.title.clone()
+        }
+
+        fn closeable(&self, _cx: &App) -> bool {
+            self.closeable
         }
 
         fn on_activate(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -6348,5 +6377,191 @@ mod tests {
             "connecting shows no badge"
         );
         assert_eq!(icons(None, true), Vec::<IconName>::new());
+    }
+
+    /// 打开一个带固定标签与常规标签的测试窗口，返回窗口与容器句柄。
+    fn open_middle_click_window(
+        cx: &mut TestAppContext,
+        regular_ids: &[&'static str],
+        uncloseable_ids: &[&'static str],
+        pinned_ids: &[&'static str],
+    ) -> (gpui::WindowHandle<Root>, Entity<TabContainer>) {
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_window = captured.clone();
+        let window = cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Theme::default());
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        size(px(1000.0), px(600.0)),
+                        cx,
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let pinned_items: Vec<TabItem> = pinned_ids
+                        .iter()
+                        .map(|id| {
+                            let view = cx.new(|cx| TestTab::new(id, cx));
+                            TabItem::new(*id, "test", view)
+                        })
+                        .collect();
+                    let regular_items: Vec<TabItem> = regular_ids
+                        .iter()
+                        .map(|id| {
+                            let view = cx.new(|cx| {
+                                if uncloseable_ids.contains(id) {
+                                    TestTab::uncloseable(id, cx)
+                                } else {
+                                    TestTab::new(id, cx)
+                                }
+                            });
+                            TabItem::new(*id, "test", view)
+                        })
+                        .collect();
+                    let container = cx.new(|cx| TabContainer::new(window, cx));
+                    container.update(cx, |tabs, cx| {
+                        for item in pinned_items {
+                            tabs.add_pinned_tab(item, cx);
+                        }
+                        for item in regular_items {
+                            tabs.add_and_activate_tab_with_focus(item, window, cx);
+                        }
+                    });
+                    *captured_for_window.lock().expect("capture lock") = Some(container.clone());
+                    let root = cx.new(|_| TestWindow {
+                        tab_container: container,
+                    });
+                    cx.new(|cx| Root::new(root, window, cx))
+                },
+            )
+            .expect("test window opens")
+        });
+        (
+            window,
+            captured
+                .lock()
+                .expect("capture lock")
+                .take()
+                .expect("tab container is captured"),
+        )
+    }
+
+    fn middle_click_tab(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} must be laid out"));
+        let point = bounds.center();
+        cx.simulate_mouse_down(point, MouseButton::Middle, gpui::Modifiers::default());
+        cx.simulate_mouse_up(point, MouseButton::Middle, gpui::Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn regular_tab_ids(
+        container: &Entity<TabContainer>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<String> {
+        cx.update(|_, cx| {
+            container
+                .read(cx)
+                .tabs()
+                .iter()
+                .map(|tab| tab.id().to_string())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn middle_click_closes_a_tab_without_hitting_the_close_button(cx: &mut TestAppContext) {
+        let (window, container) =
+            open_middle_click_window(cx, &["first", "second", "third"], &[], &["home"]);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert_eq!(
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ],
+            regular_tab_ids(&container, &mut cx)
+        );
+
+        // 让 "first" 成为活动标签，中键要关闭的是背景里的最后一个标签。
+        cx.update(|window, cx| {
+            container.update(cx, |tabs, cx| tabs.set_active_index(0, window, cx));
+        });
+        cx.run_until_parked();
+
+        // 中键落在标签中部，而不是右侧 × 上，也应关闭对应标签。
+        middle_click_tab(&mut cx, "tab-container.tab-2");
+
+        assert_eq!(
+            vec!["first".to_string(), "second".to_string()],
+            regular_tab_ids(&container, &mut cx),
+            "middle click must close only the tab under the cursor"
+        );
+        assert_eq!(
+            Some("first"),
+            cx.update(|_, cx| container
+                .read(cx)
+                .active_tab()
+                .map(|tab| tab.id().to_string()))
+                .as_deref(),
+            "closing a background tab must not steal activation from the active tab"
+        );
+
+        assert!(
+            cx.update(|_, cx| container.read(cx).has_pinned_tab_by_id("home")),
+            "middle click must not drop the pinned tab"
+        );
+    }
+
+    #[gpui::test]
+    fn middle_click_respects_uncloseable_tabs_and_leaves_left_click_alone(cx: &mut TestAppContext) {
+        let (window, container) =
+            open_middle_click_window(cx, &["sticky", "plain"], &["sticky"], &["home"]);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        middle_click_tab(&mut cx, "tab-container.tab-0");
+        assert_eq!(
+            vec!["sticky".to_string(), "plain".to_string()],
+            regular_tab_ids(&container, &mut cx),
+            "a non-closeable tab must survive middle click"
+        );
+
+        middle_click_tab(&mut cx, "tab-container.pinned-tab-0");
+        assert_eq!(
+            1,
+            cx.update(|_, cx| container.read(cx).pinned_tab_count()),
+            "pinned tabs have no close affordance, so middle click must not remove them"
+        );
+
+        // 左键仍然只负责切换激活，不关闭标签。
+        let active_bounds = cx
+            .debug_bounds("tab-container.tab-1")
+            .expect("plain tab bounds");
+        let point = active_bounds.center();
+        cx.simulate_mouse_down(point, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(point, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            vec!["sticky".to_string(), "plain".to_string()],
+            regular_tab_ids(&container, &mut cx)
+        );
+        assert_eq!(
+            Some("plain"),
+            cx.update(|_, cx| container
+                .read(cx)
+                .active_tab()
+                .map(|tab| tab.id().to_string()))
+                .as_deref()
+        );
     }
 }

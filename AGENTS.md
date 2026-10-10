@@ -716,6 +716,13 @@
 - **验证方式**：`cargo test -p one-ui --lib resize_handle_tests`、`cargo test -p redis_view --lib value_table_columns_resize_tests`（在 `#[gpui::test]` 里用 `debug_bounds` 量热区和细线的真实 bounds：边界两侧各铺够、细线停在边界、从边界左右按下都能拖动同一列；含变异验证：负边距改成 0、抓取区退回单边 6px、去掉右列那一半，对应用例都转红）。回归面：`cargo test -p one-ui --lib`（117）、`cargo test -p redis_view --lib`（77）、`cargo clippy -p one-ui -p redis_view --all-targets`、`cargo check -p main --all-targets`。
 - **适用范围**：`crates/one_ui/src/resize_handle.rs`（面板分隔条：SQL 结果面板、数据库／Mongo／Redis 侧边栏、终端工具坞共用）、`crates/redis_view/src/value_table_columns.rs`、`crates/db_view/src/{database_table_columns,table_designer_tab}.rs`、`crates/db_view/src/table_data/cell_preview_host.rs`。**故意没改的两处**（不是漏改）：`crates/core/src/tab_container.rs` 的侧边栏手柄已经是 9px（`theme_geometry().resize.hit_area()`），它挂在带 `overflow_hidden` 的面板上，跨出去的那半会被裁掉，面板内侧 9px 已经够宽；`crates/terminal_view/src/view/command_bar/render.rs` 的命令栏手柄是 6px 通栏、不锚定某条边界、两侧对称，加高会吃掉终端内容和输入框的点击。要动这两处得先把手柄搬到不裁剪的父层，属于结构改动。
 
+- **标题**：标签页鼠标动作要复用 `close_tab` 入口；gpui-component 的 `TabBar` 无法在仓内加挂鼠标钩子
+- **触发信号**：给标签栏加中键关闭（或任何新的鼠标按键动作）时，考虑在渲染层再判一次 `closeable && !is_locked`；或想把同样的手势接到工作区文件编辑器、远程文件编辑器的二级页签上。
+- **根因 / 约束**：`TabContainer::close_tab` 已经负责 `closeable` 拒绝、`is_locked` 通知、`closing_tabs` 去重和 `try_close`（未保存确认），渲染层重复判断只会产生两套守卫漂移。实测中键 down+up 不会触发该标签自己的 `on_click`（判别场景：活动标签在前、中键点最后一个背景标签，活动标签仍是它），所以既不需要在 `on_click` 里排除中键，也不能顺手加一个「中键也切激活」的分支——那是不会执行的代码。二级页签侧：`gpui_component::tab::TabBar::child(impl Into<Tab>)` 只接受 `Tab`，不能塞进带 `on_mouse_down` 的 `div` 包装层，`Tab` 自身也没有中键/关闭回调，所以 `workspace_explorer/src/editor/render.rs` 与 `remote_file_editor/src/editor_window.rs` 的页签无法在本仓加中键，只能改 gpui-kit fork。
+- **正确做法**：手势直接调 `close_tab(idx)`；固定（pinned）标签没有 × 且 `remove_pinned_tab_by_id` 会绕过 `try_close`，不要把它当中键目标。测试锚点用 `.id(...)` 后接 `.debug_selector(move || format!("tab-container.tab-{idx}"))`（`debug_bounds` 收 `&'static str`，测试里写 `"tab-container.tab-1"` 字面量）。判别「不抢激活」的场景必须是**活动标签在前、中键点最后一个背景标签**——点中间标签时 `active_index` 钳位会恰好落回原活动标签，断言空跑。
+- **验证方式**：`cargo test -p one-core --lib middle_click`（`middle_click_closes_a_tab_without_hitting_the_close_button` 覆盖只关光标下的标签且不抢激活；`middle_click_respects_uncloseable_tabs_and_leaves_left_click_alone` 覆盖不可关闭标签、固定标签与左键仍只切换）；变异验证：把 `close_tab(idx)` 改成 `close_tab(idx + 99)` 后第一条用例必须转红。回归面：`cargo test -p one-core --lib`、`cargo clippy -p one-core --all-targets`、`cargo check -p main --all-targets`。
+- **适用范围**：`crates/core/src/tab_container.rs` 的标签栏手势，以及任何想给 gpui-component `TabBar` 页签加鼠标动作的站点。
+
 ### 执行原则
 
 1. 先澄清，再实现；先缩小边界，再扩展范围。
