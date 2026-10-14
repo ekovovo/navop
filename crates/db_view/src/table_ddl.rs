@@ -1,8 +1,11 @@
-//! 建表 DDL：与表设计器的 DDL 预览走同一条链路（驱动生成）。
+//! 建表 DDL：先看驱动/服务端提供的权威建表文本，取不到再走表设计器的元数据重建链路。
 //!
-//! 悬停浮层、对象详情页签、右键「复制 DDL」三处共用这里的结果。DDL 由建表器
-//! 驱动按方言生成，因此与表设计器里看到的完全一致：引号风格、主键、索引、自增、
-//! 表选项（ENGINE/CHARSET/COLLATE/COMMENT）都由驱动决定，不再有本地手搓的近似版。
+//! 悬停浮层、对象详情页签、右键「复制 DDL」三处共用这里的结果。达梦这类方言的
+//! `DBMS_METADATA.GET_DDL` 能给出 IDENTITY、列尺寸、主键和 `STORAGE(...)` 私有子句，
+//! 而字典视图里的 `DATA_TYPE` 只是裸类型名，按元数据重建必然丢这些；因此优先采用服务端
+//! 文本。驱动没有该来源、查询失败或只回占位注释时，回退到与表设计器一致的驱动建表 SQL：
+//! 引号风格、主键、索引、自增、表选项都由驱动决定。服务端文本没带注释语句时，用元数据的
+//! 表/列注释补齐，避免换来源反而丢掉注释。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -15,6 +18,7 @@ use gpui::{AsyncApp, Task};
 use one_core::gpui_tokio::Tokio;
 use one_core::storage::DatabaseType;
 use rust_i18n::t;
+use tracing::log::warn;
 
 use crate::table_designer_tab::{build_table_design_from_metadata, find_loaded_table_info};
 
@@ -187,6 +191,9 @@ async fn fetch_driven_ddl(
         load_table_metadata(global_state.clone(), target.clone()),
     )
     .await?;
+    if let Some(ddl) = server_structure_ddl(target, &metadata) {
+        return Ok(ddl);
+    }
     let design = build_table_design_from_metadata(
         target.database_type.clone(),
         target.database.clone(),
@@ -209,12 +216,32 @@ async fn fetch_driven_ddl(
         .await
 }
 
-/// 表结构元数据（列 + 索引 + 表信息 + 方言插件）。
+/// 表结构元数据（列 + 索引 + 表信息 + 方言插件 + 可选的服务端建表文本）。
 struct TableMetadata {
     columns: Vec<ColumnInfo>,
     indexes: Vec<IndexInfo>,
     table_info: Option<TableInfo>,
     plugin: Option<Arc<dyn DatabasePlugin>>,
+    /// 驱动/服务端提供的权威建表文本；`None` 表示需要按元数据重建。
+    server_ddl: Option<String>,
+}
+
+/// 有服务端文本就用它（必要时补齐注释），否则返回 `None` 走元数据重建。
+fn server_structure_ddl(target: &TableDdlTarget, metadata: &TableMetadata) -> Option<String> {
+    let dump = metadata.server_ddl.as_deref()?;
+    let plugin = metadata.plugin.as_deref()?;
+    let ddl = plugin.structure_ddl_with_comments(
+        dump,
+        &target.database,
+        target.schema.as_deref(),
+        &target.name,
+        metadata
+            .table_info
+            .as_ref()
+            .and_then(|info| info.comment.as_deref()),
+        &metadata.columns,
+    );
+    (!ddl.is_empty()).then_some(ddl)
 }
 
 /// 与表设计器加载表结构用的是同一组查询，`list_*_direct` 要求跑在 Tokio runtime 里。
@@ -249,12 +276,30 @@ async fn load_table_metadata(
         .db_manager
         .get_plugin(&target.database_type)
         .ok();
+    // 服务端权威文本优先。取不到（方言不支持、权限不足、只有占位注释）不算失败，
+    // 与结构导出一样回退到按元数据重建。
+    let server_ddl = match global_state
+        .dump_table_create_sql_direct(
+            &target.connection_id,
+            &target.database,
+            target.schema.clone(),
+            &target.name,
+        )
+        .await
+    {
+        Ok(dump) => dump,
+        Err(error) => {
+            warn!("表结构 DDL 服务端文本不可用，回退到按元数据重建: {error}");
+            None
+        }
+    };
     Ok(TableMetadata {
         columns,
         indexes,
         // 表注释会进建表 DDL（MySQL 的 COMMENT=），所以按表名取回 TableInfo。
         table_info: find_loaded_table_info(tables, &target.name, target.schema.as_deref()),
         plugin,
+        server_ddl,
     })
 }
 
@@ -292,6 +337,122 @@ mod tests {
             TableDdlLoader::new(move |_cx, _target| gpui::Task::ready(Err(anyhow::anyhow!(error)))),
             context(),
         )
+    }
+
+    fn column_with_comment(name: &str, comment: Option<&str>) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "VARCHAR2".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            comment: comment.map(str::to_string),
+            charset: None,
+            collation: None,
+            is_auto_increment: false,
+        }
+    }
+
+    /// 引号固定成达梦口径，避免测试依赖本机驱动注册表。
+    fn dump_plugin() -> Arc<dyn DatabasePlugin> {
+        let driver = serde_json::from_str(
+            r#"{"id":"dm","name":"dm","entry":{"command":"driver"},"transport":{"name":"dm.sock"}}"#,
+        )
+        .expect("minimal dm driver manifest");
+        Arc::new(db::ipc::ExternalDatabasePlugin::for_driver(driver))
+    }
+
+    fn metadata(server_ddl: Option<&str>) -> TableMetadata {
+        TableMetadata {
+            columns: vec![
+                column_with_comment("ID", None),
+                column_with_comment("STAT_PERIOD", Some("统计周期")),
+            ],
+            indexes: Vec::new(),
+            table_info: None,
+            plugin: Some(dump_plugin()),
+            server_ddl: server_ddl.map(str::to_string),
+        }
+    }
+
+    /// 达梦字典里的 `DATA_TYPE` 只是裸类型名，IDENTITY 与主键只能靠服务端文本还原。
+    #[test]
+    fn server_dump_drives_the_ddl_and_gets_missing_comments_appended() {
+        let target = table_ref().ddl_target(&context());
+        let metadata = metadata(Some(
+            "CREATE TABLE \"public\".\"users\" (\"ID\" BIGINT IDENTITY(1, 1) NOT NULL)",
+        ));
+
+        let ddl =
+            server_structure_ddl(&target, &metadata).expect("server text should drive the DDL");
+
+        assert_eq!(
+            "CREATE TABLE \"public\".\"users\" (\"ID\" BIGINT IDENTITY(1, 1) NOT NULL);\n\
+             COMMENT ON COLUMN \"public\".\"users\".\"STAT_PERIOD\" IS '统计周期';",
+            ddl
+        );
+    }
+
+    /// 服务端文本自带注释时不重复追加，否则同一列会出现两条 `COMMENT ON`。
+    #[test]
+    fn server_dump_that_already_carries_comments_is_left_as_is() {
+        let target = table_ref().ddl_target(&context());
+        let dump = "CREATE TABLE t (\n    id INT\n)\nCOMMENT ON TABLE t IS '县区局评价数据'";
+        let metadata = metadata(Some(dump));
+
+        let ddl =
+            server_structure_ddl(&target, &metadata).expect("server text should drive the DDL");
+
+        assert_eq!(format!("{dump};"), ddl);
+    }
+
+    /// 没有服务端来源时必须继续走元数据重建。
+    #[test]
+    fn metadata_rebuild_runs_without_server_dump_or_plugin() {
+        let target = table_ref().ddl_target(&context());
+
+        assert_eq!(None, server_structure_ddl(&target, &metadata(None)));
+
+        let mut without_plugin = metadata(Some("CREATE TABLE t (id INT)"));
+        without_plugin.plugin = None;
+        assert_eq!(None, server_structure_ddl(&target, &without_plugin));
+    }
+
+    /// 接线契约：`fetch_driven_ddl` 必须在按元数据建 design 之前先问驱动要服务端文本，
+    /// 并且元数据仍然要加载（注释补齐与回退都依赖它）。
+    #[test]
+    fn the_ddl_view_asks_the_driver_before_rebuilding_from_metadata() {
+        let source = include_str!("table_ddl.rs");
+        let fetch_body = source
+            .split("async fn fetch_driven_ddl(")
+            .nth(1)
+            .expect("fetch_driven_ddl")
+            .split("/// 表结构元数据")
+            .next()
+            .expect("fetch_driven_ddl body");
+        let dump_at = fetch_body
+            .find("server_structure_ddl(")
+            .expect("DDL 查看必须优先采用驱动的服务端文本");
+        let design_at = fetch_body
+            .find("build_table_design_from_metadata(")
+            .expect("元数据重建的回退链路要保留");
+        assert!(dump_at < design_at, "服务端文本命中时不该再按元数据重建");
+
+        let loader_body = source
+            .split("async fn load_table_metadata(")
+            .nth(1)
+            .expect("load_table_metadata")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("load_table_metadata body");
+        assert!(
+            loader_body.contains("dump_table_create_sql_direct("),
+            "服务端文本要在 Tokio 元数据加载里取"
+        );
+        assert!(
+            loader_body.contains("list_columns_direct("),
+            "列元数据要继续加载，用于注释补齐与回退"
+        );
     }
 
     #[test]

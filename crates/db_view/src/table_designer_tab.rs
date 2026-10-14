@@ -175,13 +175,31 @@ pub(crate) fn build_table_design_from_metadata(
     table_info: Option<&TableInfo>,
     plugin: Option<&dyn DatabasePlugin>,
 ) -> TableDesign {
-    let column_defs: Vec<ColumnDefinition> = columns
+    let primary_key_columns = db::types::primary_key_column_names(columns, indexes);
+    let resolved_columns: Vec<ColumnInfo> = columns
+        .iter()
+        .cloned()
+        .map(|mut column| {
+            if primary_key_columns
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&column.name))
+            {
+                column.is_primary_key = true;
+            }
+            column
+        })
+        .collect();
+    let resolved_columns = resolved_columns.as_slice();
+    let column_defs: Vec<ColumnDefinition> = resolved_columns
         .iter()
         .map(|col| {
             let parsed = plugin
                 .map(|plugin| plugin.parse_column_type(&col.data_type))
                 .unwrap_or_else(|| fallback_parse_column_type(&col.data_type));
-            let primary_key_count = columns.iter().filter(|col| col.is_primary_key).count();
+            let primary_key_count = resolved_columns
+                .iter()
+                .filter(|col| col.is_primary_key)
+                .count();
             column_info_to_definition(database_type.clone(), col, parsed, primary_key_count)
         })
         .collect();
@@ -4197,6 +4215,111 @@ mod tests {
 
         assert_eq!(design.indexes.len(), 1);
         assert_eq!(design.indexes[0].name, "idx_users_email");
+    }
+
+    fn column_meta(name: &str, primary_key: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "BIGINT".to_string(),
+            is_nullable: true,
+            is_primary_key: primary_key,
+            default_value: None,
+            comment: None,
+            charset: None,
+            collation: None,
+            is_auto_increment: false,
+        }
+    }
+
+    fn primary_index(name: &str, columns: &[&str]) -> IndexInfo {
+        IndexInfo {
+            name: name.to_string(),
+            columns: columns.iter().map(|column| column.to_string()).collect(),
+            is_unique: true,
+            is_primary: true,
+            index_type: Some("CLUSTER".to_string()),
+        }
+    }
+
+    /// IPC 驱动的 `schema/columns` 不报主键（`is_primary` 被写死成 `false`），但
+    /// `schema/indexes` 能给到主键索引。重建 DDL 必须据此回填，否则 `PRIMARY KEY`
+    /// 子句整段丢失（达梦表结构查看就是这个现象）。
+    #[test]
+    fn primary_key_is_restored_from_the_primary_index_when_columns_do_not_report_it() {
+        let design = build_table_design_from_metadata(
+            DatabaseType::external("dm"),
+            "AIYPZH".to_string(),
+            "COUNTY_LEVEL_UTILITY_INDEX_EVALUATION_RESULT".to_string(),
+            &[
+                column_meta("ID", false),
+                column_meta("CITY_BUREAU_NO", false),
+            ],
+            &[
+                primary_index("INDEX33554434", &["ID"]),
+                IndexInfo {
+                    name: "IDX_CITY".to_string(),
+                    columns: vec!["CITY_BUREAU_NO".to_string()],
+                    is_unique: false,
+                    is_primary: false,
+                    index_type: None,
+                },
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(vec!["ID"], design.primary_key_columns());
+        assert!(design.columns[0].is_primary_key);
+        assert!(!design.columns[1].is_primary_key);
+        // 主键索引仍然只作为约束存在，不作为可编辑索引重复出现。
+        assert_eq!(1, design.indexes.len());
+        assert_eq!("IDX_CITY", design.indexes[0].name);
+    }
+
+    /// 联合主键要按主键索引的列顺序回填；列元数据已经报主键时不受索引影响。
+    #[test]
+    fn composite_primary_key_follows_the_index_column_order() {
+        let design = build_table_design_from_metadata(
+            DatabaseType::external("dm"),
+            "AIYPZH".to_string(),
+            "T".to_string(),
+            &[column_meta("B", false), column_meta("A", false)],
+            &[primary_index("PK_T", &["B", "A"])],
+            None,
+            None,
+        );
+
+        assert_eq!(vec!["B", "A"], design.primary_key_columns());
+    }
+
+    #[test]
+    fn column_reported_primary_key_is_not_overridden_by_indexes() {
+        let design = build_table_design_from_metadata(
+            DatabaseType::MySQL,
+            "app".to_string(),
+            "users".to_string(),
+            &[column_meta("ID", true), column_meta("NAME", false)],
+            &[primary_index("idx_other", &["NAME"])],
+            None,
+            None,
+        );
+
+        assert_eq!(vec!["ID"], design.primary_key_columns());
+    }
+
+    #[test]
+    fn table_comment_does_not_invent_a_primary_key() {
+        let design = build_table_design_from_metadata(
+            DatabaseType::external("dm"),
+            "AIYPZH".to_string(),
+            "T".to_string(),
+            &[column_meta("ID", false)],
+            &[],
+            None,
+            None,
+        );
+
+        assert!(design.primary_key_columns().is_empty());
     }
 
     #[test]

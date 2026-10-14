@@ -2756,6 +2756,47 @@ pub trait DatabasePlugin: Send + Sync {
         default_export_table_create_sql(self, connection, database, schema, table).await
     }
 
+    /// 表结构查看链路使用：优先返回方言服务端提供的权威建表文本（达梦
+    /// `DBMS_METADATA.GET_DDL`、MySQL `SHOW CREATE TABLE` 这类）。
+    /// 默认 `None` 表示该方言没有服务端来源，调用方按列/索引元数据重建。
+    async fn dump_table_create_sql(
+        &self,
+        _connection: &dyn DbConnection,
+        _database: &str,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 把服务端建表文本合成最终 DDL：补齐终止符，并在服务端没带 `COMMENT ON`
+    /// 时用元数据的表/列注释补齐（达梦 `GET_DDL('TABLE', ..)` 就属于后者）。
+    /// 文本为空时返回空串，表示调用方应回退到按元数据重建。
+    fn structure_ddl_with_comments(
+        &self,
+        dump: &str,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+        table_comment: Option<&str>,
+        columns: &[ColumnInfo],
+    ) -> String {
+        let dump = dump.trim();
+        if dump.is_empty() {
+            return String::new();
+        }
+        let mut statements = vec![terminate_ddl_statement(dump)];
+        if !ddl_carries_comment_statements(dump) {
+            let table_ref = self.format_export_table_reference(database, schema, table);
+            statements.extend(
+                ddl_comment_statements(self, &table_ref, table_comment, columns)
+                    .iter()
+                    .map(|statement| terminate_ddl_statement(statement)),
+            );
+        }
+        statements.join("\n")
+    }
+
     /// Export table data as INSERT statements
     async fn export_table_data_sql(
         &self,
@@ -3301,10 +3342,19 @@ where
         .iter()
         .map(|column| format!("    {}", plugin.build_column_definition(column, true)))
         .collect::<Vec<_>>();
-    let primary_keys = columns
+    let mut primary_key_names = primary_key_column_names(&columns, &[]);
+    if primary_key_names.is_empty() {
+        // 外部 IPC 驱动的 `schema/columns` 不报主键，只能靠主键索引还原；索引查询
+        // 失败不该让整次结构导出失败，所以这里 best-effort。
+        let indexes = plugin
+            .list_indexes(connection, database, schema.map(|s| s.to_string()), table)
+            .await
+            .unwrap_or_default();
+        primary_key_names = primary_key_column_names(&columns, &indexes);
+    }
+    let primary_keys = primary_key_names
         .iter()
-        .filter(|column| column.is_primary_key)
-        .map(|column| plugin.quote_identifier(&column.name))
+        .map(|name| plugin.quote_identifier(name))
         .collect::<Vec<_>>();
     if !primary_keys.is_empty() {
         definitions.push(format!("    PRIMARY KEY ({})", primary_keys.join(", ")));
@@ -3318,38 +3368,70 @@ where
 
     // Best-effort table comment: drivers that cannot list table metadata are
     // still able to export the structure (columns + primary key + column comments).
-    let mut statements = Vec::new();
-    if let Ok(tables) = plugin
+    let table_comment = match plugin
         .list_tables(connection, database, schema.map(|s| s.to_string()))
         .await
     {
-        if let Some(comment) = tables
+        Ok(tables) => tables
             .iter()
             .find(|info| info.name == table)
-            .and_then(|info| info.comment.clone())
-        {
-            statements.push(format!(
-                "COMMENT ON TABLE {} IS {}",
-                table_ref,
-                plugin.escape_sql_value(&comment)
-            ));
-        }
-    }
-    statements.extend(columns.iter().filter_map(|column| {
-        column.comment.as_ref().map(|comment| {
-            format!(
-                "COMMENT ON COLUMN {}.{} IS {}",
-                table_ref,
-                plugin.quote_identifier(&column.name),
-                plugin.escape_sql_value(comment)
-            )
-        })
-    }));
+            .and_then(|info| info.comment.clone()),
+        Err(_) => None,
+    };
+    let statements = ddl_comment_statements(plugin, &table_ref, table_comment.as_deref(), &columns);
     if !statements.is_empty() {
         sql.push('\n');
         sql.push_str(&statements.join(";\n"));
     }
     Ok(sql)
+}
+
+/// 表/列注释对应的 `COMMENT ON` 语句，结构导出与服务端 DDL 补齐共用。
+fn ddl_comment_statements<P>(
+    plugin: &P,
+    table_ref: &str,
+    table_comment: Option<&str>,
+    columns: &[ColumnInfo],
+) -> Vec<String>
+where
+    P: DatabasePlugin + ?Sized,
+{
+    let mut statements = Vec::new();
+    if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
+        statements.push(format!(
+            "COMMENT ON TABLE {table_ref} IS {}",
+            plugin.escape_sql_value(comment)
+        ));
+    }
+    statements.extend(columns.iter().filter_map(|column| {
+        column
+            .comment
+            .as_deref()
+            .filter(|comment| !comment.trim().is_empty())
+            .map(|comment| {
+                format!(
+                    "COMMENT ON COLUMN {}.{} IS {}",
+                    table_ref,
+                    plugin.quote_identifier(&column.name),
+                    plugin.escape_sql_value(comment)
+                )
+            })
+    }));
+    statements
+}
+
+/// 服务端建表文本里是否已经自带注释语句，避免宿主重复追加同一列的 `COMMENT ON`。
+fn ddl_carries_comment_statements(ddl: &str) -> bool {
+    ddl.lines().any(|line| {
+        line.trim_start()
+            .to_ascii_uppercase()
+            .starts_with("COMMENT ON")
+    })
+}
+
+/// 统一补上语句终止符：先去尾部已有的 `;`，再按 DDL 文本约定加回一个。
+fn terminate_ddl_statement(statement: &str) -> String {
+    format!("{};", statement.trim_end().trim_end_matches(';').trim_end())
 }
 
 fn foreign_key_action_sql(action: &str) -> Option<String> {

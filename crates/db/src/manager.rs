@@ -2231,6 +2231,52 @@ impl GlobalDbState {
         .await
     }
 
+    /// 表结构查看链路使用：向方言插件取服务端提供的权威建表文本（达梦
+    /// `DBMS_METADATA.GET_DDL` 这类）。`None` 表示该方言没有可用来源，
+    /// 调用方回退到按列/索引元数据重建。
+    ///
+    /// 与 `list_columns_direct` 一样是纯异步入口，要求跑在 Tokio runtime 里。
+    pub async fn dump_table_create_sql_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+        table: &str,
+    ) -> anyhow::Result<Option<String>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .dump_table_create_sql(conn, database, schema.as_deref(), table)
+                .await
+                .map_err(|error| anyhow::anyhow!("{}", error))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
     async fn execute_with_session_internal(
         &self,
         cx: &mut AsyncApp,

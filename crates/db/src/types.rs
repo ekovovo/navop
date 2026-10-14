@@ -270,6 +270,27 @@ pub struct IndexInfo {
     pub index_type: Option<String>,
 }
 
+/// 建表 DDL 用的主键列名：优先列元数据，其次主键索引。
+///
+/// 内置插件的 `schema/columns` 会直接报主键；外部 IPC 驱动不会（`is_primary`
+/// 恒为 `false`），只能靠 `schema/indexes` 的主键索引还原，因此这里做单向回退：
+/// 列元数据一旦有主键就不再参考索引，避免索引信息覆盖权威结果。
+pub fn primary_key_column_names(columns: &[ColumnInfo], indexes: &[IndexInfo]) -> Vec<String> {
+    let from_columns: Vec<String> = columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .map(|column| column.name.clone())
+        .collect();
+    if !from_columns.is_empty() {
+        return from_columns;
+    }
+    indexes
+        .iter()
+        .find(|index| index.is_primary)
+        .map(|index| index.columns.clone())
+        .unwrap_or_default()
+}
+
 /// Parameters for loading all metadata needed to compare one table-like object.
 #[derive(Debug, Clone)]
 pub struct DirectTableMetadataRequest {
@@ -1269,6 +1290,75 @@ impl ParsedColumnType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn column_meta(name: &str, primary_key: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "BIGINT".to_string(),
+            is_nullable: true,
+            is_primary_key: primary_key,
+            default_value: None,
+            comment: None,
+            charset: None,
+            collation: None,
+            is_auto_increment: false,
+        }
+    }
+
+    fn index_meta(name: &str, columns: &[&str], primary: bool) -> IndexInfo {
+        IndexInfo {
+            name: name.to_string(),
+            columns: columns.iter().map(|column| column.to_string()).collect(),
+            is_unique: primary,
+            is_primary: primary,
+            index_type: Some("CLUSTER".to_string()),
+        }
+    }
+
+    /// IPC 驱动（达梦、OceanBase、Kingbase 等）的 `schema/columns` 把 `is_primary`
+    /// 写死成 `false`，但 `schema/indexes` 能给出主键索引；不回填就会让
+    /// `PRIMARY KEY` 子句整段丢失（达梦表结构查看就是这个现象）。
+    #[test]
+    fn primary_key_column_names_falls_back_to_the_primary_index() {
+        let columns = [column_meta("ID", false), column_meta("NAME", false)];
+        let indexes = [
+            index_meta("IDX_NAME", &["NAME"], false),
+            index_meta("INDEX33554434", &["ID"], true),
+        ];
+
+        assert_eq!(
+            vec!["ID".to_string()],
+            primary_key_column_names(&columns, &indexes)
+        );
+    }
+
+    #[test]
+    fn primary_key_column_names_keeps_index_order_for_composite_keys() {
+        let columns = [column_meta("B", false), column_meta("A", false)];
+        let indexes = [index_meta("PK_T", &["B", "A"], true)];
+
+        assert_eq!(
+            vec!["B".to_string(), "A".to_string()],
+            primary_key_column_names(&columns, &indexes)
+        );
+    }
+
+    /// 列元数据已经报主键时以它为准，不被索引改写。
+    #[test]
+    fn primary_key_column_names_prefers_column_metadata() {
+        let columns = [column_meta("ID", true), column_meta("NAME", false)];
+        let indexes = [index_meta("IDX_OTHER", &["NAME"], true)];
+
+        assert_eq!(
+            vec!["ID".to_string()],
+            primary_key_column_names(&columns, &indexes)
+        );
+    }
+
+    #[test]
+    fn primary_key_column_names_is_empty_without_any_source() {
+        assert!(primary_key_column_names(&[], &[]).is_empty());
+    }
 
     #[test]
     fn object_view_columns_are_serializable() {

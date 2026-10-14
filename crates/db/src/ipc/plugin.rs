@@ -1948,54 +1948,10 @@ impl DatabasePlugin for ExternalDatabasePlugin {
         schema: Option<&str>,
         table: &str,
     ) -> Result<String> {
-        if self
-            .driver
-            .methods
-            .iter()
-            .any(|method| method == wire_method::SCHEMA_DUMP_DDL)
+        if let Some(dump) =
+            driver_dump_ddl_create_sql(self, connection, database, schema, table).await
         {
-            let mut params = serde_json::to_value(wire_schema::DumpDdlParams {
-                conn_id: 0,
-                objects: vec![wire_schema::ObjectRef {
-                    kind: wire_schema::ObjectKind::Table,
-                    name: table.to_string(),
-                    schema: schema.map(ToOwned::to_owned),
-                    database: Some(database.to_string()),
-                }],
-                options: wire_schema::DumpDdlOptions::default(),
-            })?;
-            // The per-connection driver_request_value auto-injects the real
-            // conn_id for schema-namespace methods; omit it here.
-            if let Some(obj) = params.as_object_mut() {
-                obj.remove("conn_id");
-            }
-            let dump = self
-                .metadata::<wire_schema::DumpDdlResult>(
-                    connection,
-                    wire_method::SCHEMA_DUMP_DDL,
-                    params,
-                )
-                .await;
-            if let Ok(result) = dump {
-                // Only trust statements that actually carry DDL. Some drivers
-                // (e.g. openGauss) reply to `schema/dump_ddl` for tables with a
-                // placeholder comment when they have no server-side provider;
-                // treating that as real output would replace the exported
-                // structure with a useless comment, so drop comment-only
-                // statements and fall back to the generic builder.
-                let real: Vec<String> = result
-                    .statements
-                    .into_iter()
-                    .filter(|statement| dump_statement_has_ddl(statement))
-                    .collect();
-                let joined = real.join("\n");
-                // The exporter appends `;` after the returned string, so strip
-                // trailing terminators/whitespace to avoid a double semicolon.
-                let joined = joined.trim_end().trim_end_matches(';').trim_end();
-                if !joined.is_empty() {
-                    return Ok(joined.to_string());
-                }
-            }
+            return Ok(dump);
         }
         // Call the shared generic builder directly: a `DatabasePlugin::method`
         // dispatch from inside an override would resolve back to this override
@@ -2003,6 +1959,74 @@ impl DatabasePlugin for ExternalDatabasePlugin {
         crate::plugin::default_export_table_create_sql(self, connection, database, schema, table)
             .await
     }
+
+    /// 表结构查看链路：把驱动的 `schema/dump_ddl` 服务端文本交回宿主，
+    /// 由宿主补齐注释后展示；没有可用来源时返回 `None` 以便按元数据重建。
+    async fn dump_table_create_sql(
+        &self,
+        connection: &dyn DbConnection,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<String>> {
+        Ok(driver_dump_ddl_create_sql(self, connection, database, schema, table).await)
+    }
+}
+
+/// Shared `schema/dump_ddl` lookup for both the structure exporter and the
+/// table-structure DDL view. `None` means "no usable server-side text": the
+/// driver does not declare the method, the query failed, or the provider only
+/// replied with a placeholder comment (e.g. openGauss without
+/// `pg_get_tabledef`), in which case callers must rebuild from metadata.
+async fn driver_dump_ddl_create_sql(
+    plugin: &ExternalDatabasePlugin,
+    connection: &dyn DbConnection,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<String> {
+    if !plugin
+        .driver
+        .methods
+        .iter()
+        .any(|method| method == wire_method::SCHEMA_DUMP_DDL)
+    {
+        return None;
+    }
+    let mut params = serde_json::to_value(wire_schema::DumpDdlParams {
+        conn_id: 0,
+        objects: vec![wire_schema::ObjectRef {
+            kind: wire_schema::ObjectKind::Table,
+            name: table.to_string(),
+            schema: schema.map(ToOwned::to_owned),
+            database: Some(database.to_string()),
+        }],
+        options: wire_schema::DumpDdlOptions::default(),
+    })
+    .ok()?;
+    // The per-connection driver_request_value auto-injects the real
+    // conn_id for schema-namespace methods; omit it here.
+    if let Some(obj) = params.as_object_mut() {
+        obj.remove("conn_id");
+    }
+    let result = plugin
+        .metadata::<wire_schema::DumpDdlResult>(connection, wire_method::SCHEMA_DUMP_DDL, params)
+        .await
+        .ok()?;
+    // Only trust statements that actually carry DDL. Some drivers reply to
+    // `schema/dump_ddl` for tables with a placeholder comment when they have no
+    // server-side provider; treating that as real output would replace the
+    // structure with a useless comment.
+    let real: Vec<String> = result
+        .statements
+        .into_iter()
+        .filter(|statement| dump_statement_has_ddl(statement))
+        .collect();
+    let joined = real.join("\n");
+    // The exporter appends `;` after the returned string, so strip trailing
+    // terminators/whitespace to avoid a double semicolon.
+    let joined = joined.trim_end().trim_end_matches(';').trim_end();
+    (!joined.is_empty()).then(|| joined.to_string())
 }
 
 /// Returns true when `statement` contains at least one line of real DDL, i.e.
@@ -2138,7 +2162,13 @@ fn column_type_string(column: &ColumnDefinition) -> String {
             type_str = format!("{}({})", type_str, precision);
         }
     } else if let Some(length) = column.length {
-        type_str = format!("{}({})", type_str, length);
+        // 类型串只带一个括号段时，`parse_column_type` 会把首参放进 `length`；
+        // `DECIMAL(10,4)` 的 scale 必须跟着回来，否则回退重建会丢成 `DECIMAL(10)`。
+        if let Some(scale) = column.scale {
+            type_str = format!("{}({},{})", type_str, length, scale);
+        } else {
+            type_str = format!("{}({})", type_str, length);
+        }
     }
     type_str
 }
@@ -2728,12 +2758,22 @@ mod tests {
 
     struct ExportDdlConnection {
         config: DbConnectionConfig,
+        /// 模拟外部 IPC 驱动：`schema/columns` 不报主键，只有 `schema/indexes` 知道。
+        primary_key_only_in_indexes: bool,
     }
 
     impl ExportDdlConnection {
         fn new() -> Self {
             Self {
                 config: DriverRequestOnlyConnection::new().config,
+                primary_key_only_in_indexes: false,
+            }
+        }
+
+        fn with_primary_key_only_in_indexes() -> Self {
+            Self {
+                config: DriverRequestOnlyConnection::new().config,
+                primary_key_only_in_indexes: true,
             }
         }
     }
@@ -2783,7 +2823,7 @@ mod tests {
                         "raw_type": "INTEGER",
                         "nullable": false,
                         "default": null,
-                        "is_primary": true,
+                        "is_primary": !self.primary_key_only_in_indexes,
                         "is_unique": false,
                         "is_partition_key": false,
                         "is_clustering_key": false,
@@ -2811,6 +2851,18 @@ mod tests {
                         "extra": null
                     }
                 ])),
+                wire_method::SCHEMA_INDEXES if self.primary_key_only_in_indexes => {
+                    Ok(serde_json::json!([
+                        {
+                            "name": "INDEX33554434",
+                            "columns": ["id"],
+                            "is_unique": true,
+                            "is_primary": true,
+                            "kind": "CLUSTER",
+                            "type": "CLUSTER"
+                        }
+                    ]))
+                }
                 wire_method::SCHEMA_OBJECTS if params["kinds"][0] == "table" => {
                     Ok(serde_json::json!([
                         {
@@ -3688,6 +3740,20 @@ mod tests {
         );
     }
 
+    /// 外部驱动不报列级主键时，结构导出要靠主键索引把 `PRIMARY KEY` 还原回来。
+    #[tokio::test]
+    async fn default_export_table_create_sql_restores_primary_key_from_indexes() {
+        let plugin = ExternalDatabasePlugin::new();
+        let connection = ExportDdlConnection::with_primary_key_only_in_indexes();
+
+        let ddl = plugin
+            .export_table_create_sql(&connection, "main", None, "events")
+            .await
+            .expect("index-derived primary key should reach the exported DDL");
+
+        assert!(ddl.contains("PRIMARY KEY (\"id\")"), "ddl = {ddl}");
+    }
+
     #[tokio::test]
     async fn export_table_create_sql_uses_driver_dump_ddl_when_declared() {
         let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
@@ -3754,6 +3820,172 @@ mod tests {
             "comment-only dump_ddl must not replace the exported structure with a comment"
         );
         assert!(ddl.contains("PRIMARY KEY (\"id\")"));
+    }
+
+    fn dump_ddl_plugin() -> ExternalDatabasePlugin {
+        let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
+        driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
+        ExternalDatabasePlugin::for_driver(driver)
+    }
+
+    fn commented_column(name: &str, comment: Option<&str>) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: "VARCHAR2".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            comment: comment.map(str::to_string),
+            charset: None,
+            collation: None,
+            is_auto_increment: false,
+        }
+    }
+
+    /// 表结构查看链路：驱动声明了 `schema/dump_ddl` 时，服务端文本要原样交回。
+    #[tokio::test]
+    async fn dump_table_create_sql_returns_the_driver_server_text() {
+        let plugin = dump_ddl_plugin();
+        let connection = DumpDdlConnection::new();
+
+        let dump = plugin
+            .dump_table_create_sql(&connection, "main", Some("public"), "events")
+            .await
+            .expect("schema/dump_ddl should succeed")
+            .expect("a declared dump method must hand the server text back");
+
+        assert!(dump.starts_with("CREATE TABLE events"), "dump = {dump}");
+        assert!(
+            !dump.ends_with(';'),
+            "the terminator belongs to the caller, dump = {dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_table_create_sql_returns_none_without_the_dump_method() {
+        let mut driver = driver_manifest("plain-driver", false, "plain-driver.connection");
+        driver.methods = vec![wire_method::SCHEMA_COLUMNS.to_string()];
+        let plugin = ExternalDatabasePlugin::for_driver(driver);
+        let connection = DumpDdlConnection::new();
+
+        let dump = plugin
+            .dump_table_create_sql(&connection, "main", None, "events")
+            .await
+            .expect("an undeclared dump method is a fallback, not an error");
+
+        assert_eq!(None, dump);
+        assert!(
+            connection.dump_params().is_null(),
+            "must not query when the driver does not declare schema/dump_ddl"
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_table_create_sql_returns_none_for_empty_or_placeholder_dump() {
+        let plugin = dump_ddl_plugin();
+
+        for connection in [
+            DumpDdlConnection::with_empty_dump(true),
+            DumpDdlConnection::with_comment_only_dump(true),
+        ] {
+            let dump = plugin
+                .dump_table_create_sql(&connection, "main", None, "events")
+                .await
+                .expect("an empty dump should fall back instead of failing");
+            assert_eq!(
+                None, dump,
+                "empty or placeholder dump_ddl must fall back to metadata"
+            );
+        }
+    }
+
+    /// 达梦 `GET_DDL('TABLE', ..)` 只给建表文本，注释仍要从元数据补齐。
+    #[test]
+    fn structure_ddl_adds_comments_the_server_text_left_out() {
+        let plugin = dump_ddl_plugin();
+        let columns = vec![
+            commented_column("id", Some("event id")),
+            commented_column("name", None),
+        ];
+
+        let ddl = plugin.structure_ddl_with_comments(
+            "CREATE TABLE \"public\".\"events\" (\"ID\" BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL)",
+            "main",
+            Some("public"),
+            "events",
+            Some("event stream"),
+            &columns,
+        );
+
+        assert_eq!(
+            "CREATE TABLE \"public\".\"events\" (\"ID\" BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL);\n\
+             COMMENT ON TABLE \"public\".\"events\" IS 'event stream';\n\
+             COMMENT ON COLUMN \"public\".\"events\".\"id\" IS 'event id';",
+            ddl
+        );
+    }
+
+    /// 服务端文本已经带注释时不重复追加，否则同一列会出现两条 `COMMENT ON`。
+    #[test]
+    fn structure_ddl_keeps_comments_already_carried_by_the_server_text() {
+        let plugin = dump_ddl_plugin();
+        let columns = vec![commented_column("id", Some("event id"))];
+        let dump = "CREATE TABLE events (\n    id INTEGER NOT NULL\n)\nCOMMENT ON TABLE events IS 'event stream'";
+
+        let ddl = plugin.structure_ddl_with_comments(
+            dump,
+            "main",
+            None,
+            "events",
+            Some("event stream"),
+            &columns,
+        );
+
+        assert_eq!(format!("{dump};"), ddl);
+    }
+
+    #[test]
+    fn structure_ddl_without_server_text_stays_empty() {
+        let plugin = dump_ddl_plugin();
+
+        let ddl = plugin.structure_ddl_with_comments(
+            "   ",
+            "main",
+            None,
+            "events",
+            Some("event stream"),
+            &[commented_column("id", Some("event id"))],
+        );
+
+        assert_eq!("", ddl);
+    }
+
+    /// 回退路径：达梦把 `DECIMAL(10,4)` 解析成 length=10 / scale=4，
+    /// `precision` 仍是 `None`，此时不能只输出 `DECIMAL(10)`。
+    #[test]
+    fn column_type_string_keeps_scale_without_precision() {
+        let column = ColumnDefinition {
+            name: "overall_score".to_string(),
+            data_type: "DECIMAL".to_string(),
+            length: Some(10),
+            scale: Some(4),
+            ..ColumnDefinition::default()
+        };
+
+        assert_eq!("DECIMAL(10,4)", column_type_string(&column));
+    }
+
+    /// 只有长度时保持原样，避免把 `VARCHAR2(255)` 渲染成多一个逗号。
+    #[test]
+    fn column_type_string_keeps_bare_length_when_scale_is_absent() {
+        let column = ColumnDefinition {
+            name: "city_bureau_no".to_string(),
+            data_type: "VARCHAR2".to_string(),
+            length: Some(255),
+            ..ColumnDefinition::default()
+        };
+
+        assert_eq!("VARCHAR2(255)", column_type_string(&column));
     }
 
     #[tokio::test]
